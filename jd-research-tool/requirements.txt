@@ -1,0 +1,5 @@
+opencv-python
+pillow
+pytesseract
+python-dotenv
+google-genai
