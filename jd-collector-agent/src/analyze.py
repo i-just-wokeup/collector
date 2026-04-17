@@ -12,8 +12,9 @@ from db import get_db_connection
 from utils import GeminiQuotaExceededError, is_gemini_quota_error
 
 
+BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = r"C:\dev\jd_data.db"
-DEFAULT_JOB_FAMILIES_PATH = r"C:\dev\job_families.json"
+DEFAULT_JOB_FAMILIES_PATH = str((BASE_DIR / "job_families.json").resolve())
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 MAX_GEMINI_SECTIONS = 100
 MAX_CRITERIA_PER_CATEGORY = 5
