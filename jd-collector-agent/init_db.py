@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import sqlite3
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS job_postings (
   seniority_text        TEXT DEFAULT '',
   employment_type       TEXT DEFAULT '',
   raw_text              TEXT DEFAULT '',
+  source_category       TEXT DEFAULT '',
   captured_at           TEXT NOT NULL,
   classification_status TEXT NOT NULL DEFAULT 'pending',
   created_at            TEXT NOT NULL
@@ -80,6 +82,19 @@ CREATE TABLE IF NOT EXISTS criteria_stats (
   UNIQUE(job_family, keyword)
 );
 CREATE INDEX IF NOT EXISTS idx_criteria_stats_job_family ON criteria_stats(job_family);
+
+CREATE TABLE IF NOT EXISTS job_posting_roles (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id            TEXT NOT NULL REFERENCES job_postings(id) ON DELETE CASCADE,
+  role_name         TEXT NOT NULL,
+  display_order     INTEGER NOT NULL DEFAULT 0,
+  main_tasks_json   TEXT NOT NULL DEFAULT '[]',
+  requirements_json TEXT NOT NULL DEFAULT '[]',
+  preferred_json    TEXT NOT NULL DEFAULT '[]',
+  created_at        TEXT NOT NULL,
+  UNIQUE(job_id, display_order)
+);
+CREATE INDEX IF NOT EXISTS idx_job_posting_roles_job_id ON job_posting_roles(job_id);
 """
 
 
@@ -146,10 +161,26 @@ def fetch_job_family_count(connection: sqlite3.Connection) -> int:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="JD collector DB 초기화")
+    parser.add_argument(
+        "--families-file",
+        default=None,
+        help="직무군 정의 JSON 파일 경로 (기본값: job_families.json)",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=None,
+        help="DB 파일 경로 (기본값: 환경변수 JD_DB_PATH 또는 C:\\dev\\jd_data.db)",
+    )
+    args = parser.parse_args()
+
     load_dotenv(BASE_DIR / ".env")
 
-    db_path = resolve_path(os.getenv("JD_DB_PATH", DEFAULT_DB_PATH))
-    json_path = resolve_path(DEFAULT_JOB_FAMILIES_PATH)
+    raw_db_path = args.db_path or os.getenv("JD_DB_PATH", DEFAULT_DB_PATH)
+    db_path = resolve_path(raw_db_path)
+
+    raw_families_path = args.families_file or DEFAULT_JOB_FAMILIES_PATH
+    json_path = resolve_path(raw_families_path)
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     families = load_job_families(json_path)
@@ -157,6 +188,18 @@ def main() -> None:
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(DDL)
+        # 기존 DB 마이그레이션 (이미 컬럼/인덱스가 존재하면 무시)
+        for alter_sql in [
+            "ALTER TABLE job_postings ADD COLUMN source_category TEXT DEFAULT ''",
+            "ALTER TABLE job_postings ADD COLUMN common_requirements_json TEXT DEFAULT '[]'",
+            "ALTER TABLE job_postings ADD COLUMN common_preferred_json TEXT DEFAULT '[]'",
+            # job_posting_roles 중복 방지 UNIQUE index (기존 DB용)
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_posting_roles_unique ON job_posting_roles(job_id, display_order)",
+        ]:
+            try:
+                connection.execute(alter_sql)
+            except Exception:
+                pass
         seed_job_families(connection, families)
         connection.commit()
 
@@ -164,6 +207,7 @@ def main() -> None:
         family_count = fetch_job_family_count(connection)
 
     print(f"DB path: {db_path}")
+    print(f"families file: {json_path}")
     print("Tables:")
     for table_name in table_names:
         print(f"- {table_name}")

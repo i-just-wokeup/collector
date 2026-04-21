@@ -1,0 +1,58 @@
+[
+  {
+    "id": "software",
+    "display_name": "개발 (소프트웨어)",
+    "category": "dev",
+    "aliases": ["개발자", "소프트웨어", "AI", "데이터", "백엔드", "프론트엔드", "풀스택", "DevOps", "모바일"],
+    "jobkorea_top100_codes": [10031]
+  },
+  {
+    "id": "engineering",
+    "display_name": "엔지니어링 (하드웨어/제조/R&D)",
+    "category": "engineering",
+    "aliases": ["엔지니어", "설계", "제조", "생산", "R&D", "연구개발", "기구", "전기", "전자", "기계"],
+    "jobkorea_top100_codes": [10040, 10041]
+  },
+  {
+    "id": "planning_strategy",
+    "display_name": "기획/전략 (PM/사업기획)",
+    "category": "business",
+    "aliases": ["기획", "전략", "PM", "프로덕트 매니저", "서비스 기획", "경영기획", "사업기획"],
+    "jobkorea_top100_codes": [10026]
+  },
+  {
+    "id": "marketing",
+    "display_name": "마케팅",
+    "category": "business",
+    "aliases": ["마케터", "마케팅", "광고", "MD", "퍼포먼스 마케팅", "브랜드", "콘텐츠"],
+    "jobkorea_top100_codes": [10030]
+  },
+  {
+    "id": "design",
+    "display_name": "디자인",
+    "category": "business",
+    "aliases": ["디자이너", "UX", "UI", "그래픽", "영상", "제품디자인"],
+    "jobkorea_top100_codes": [10032]
+  },
+  {
+    "id": "sales",
+    "display_name": "영업",
+    "category": "business",
+    "aliases": ["영업", "세일즈", "BD", "사업개발", "영업관리", "해외영업"],
+    "jobkorea_top100_codes": [10035]
+  },
+  {
+    "id": "business_support",
+    "display_name": "경영지원 (인사/재무/법무)",
+    "category": "business",
+    "aliases": ["인사", "HR", "채용", "노무", "재무", "회계", "경리", "IR", "법무", "컴플라이언스", "총무", "사무"],
+    "jobkorea_top100_codes": [10028, 10029, 10027]
+  },
+  {
+    "id": "operations_service",
+    "display_name": "운영/서비스 (CS/물류 등)",
+    "category": "business",
+    "aliases": ["CS", "고객지원", "고객센터", "고객상담", "운영", "물류", "무역", "SCM", "리테일", "유통"],
+    "jobkorea_top100_codes": [10036, 10039, 10033]
+  }
+]

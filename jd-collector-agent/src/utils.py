@@ -2,6 +2,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 CORE_SECTION_KEYWORDS = [
     "주요 업무", "주요업무",
@@ -16,40 +17,6 @@ CORE_SECTION_KEYWORDS = [
     "responsibilities",
     "preferred",
     "qualifications",
-]
-
-TECH_KEYWORDS = [
-    "api",
-    "백엔드",
-    "backend",
-    "서버",
-    "db",
-    "sql",
-    "nosql",
-    "aws",
-    "docker",
-    "kubernetes",
-    "spring",
-    "java",
-    "kotlin",
-    "python",
-    "django",
-    "fastapi",
-    "node.js",
-    "react",
-    "typescript",
-    "linux",
-    "redis",
-    "kafka",
-    "orm",
-    "query",
-    "인프라",
-    "클라우드",
-    "배포",
-    "최적화",
-    "설계",
-    "개발",
-    "운영",
 ]
 
 SOFT_SKILL_KEYWORDS = [
@@ -72,12 +39,81 @@ QUOTA_ERROR_KEYWORDS = [
     "429",
 ]
 
-RAW_TEXT_CUT_KEYWORDS = [
-    "기업 정보",
-    "복지",
-    "리뷰",
-    "추천 공고",
-    "다른 공고",
+RAW_TEXT_CUT_KEYWORDS: list[str] = []
+
+# ──────────────────────────────────────────────
+# UI 노이즈 제거 상수
+# ──────────────────────────────────────────────
+
+# 이 키워드 이후 텍스트를 잘라낸다 (구간 절단)
+# 주의: 공고 본문 이후 하단에만 등장하는 키워드만 넣어야 한다.
+# 상단 네비게이션에도 나올 수 있는 키워드는 UI_NOISE_LINE_KEYWORDS(줄 단위 제거)로 처리한다.
+UI_NOISE_CUT_KEYWORDS: list[str] = []
+
+# 줄 단위로 제거할 공통 노이즈 문구
+UI_NOISE_LINE_KEYWORDS: list[str] = [
+    "합격확률",
+    "공채정보",
+    "신입·인턴",
+    "기업·연봉",
+    "취업톡톡",
+    "취업특강",
+    "기업 서비스",
+    "지원자 현황 통계",
+    "이 공고에 지원할까",
+    "로그인하면",
+    "본 채용정보는",
+    "무단전재",
+    "재배포",
+    "채용정보에 잘못된 내용이 있을 경우",
+    "맨 위로",
+    "오늘 본 공고",
+    "비슷한 조건의 AI 추천공고",
+    "지도보기",
+    "희망기업",
+    "JOB 접기",
+    "JOB 정기",
+    "가족친화인증기업 채용관",
+    "적합도 체크",
+    "AI 추천공고",
+    "제공된 정보는 업무 외 다른 용도로 사용되지 않습니다",
+]
+
+# 잡코리아 전용 노이즈 줄 키워드
+UI_NOISE_LINE_KEYWORDS_JOBKOREA: list[str] = [
+    "기업정보 더보기",
+    "합격 자소서",
+    "면접후기",
+    "이 기업의 취업전략",
+    "다른공고",
+]
+
+# 사람인 전용 노이즈 줄 키워드
+UI_NOISE_LINE_KEYWORDS_SARAMIN: list[str] = [
+    "채용중인 기업",
+    "지원현황",
+]
+
+# ──────────────────────────────────────────────
+# 저가치 문장 필터 상수
+# ──────────────────────────────────────────────
+
+# 이 패턴이 포함된 문장은 직무 기준 생성에 무가치하다
+LOW_VALUE_LINE_PATTERNS: list[str] = [
+    "해외여행 결격사유",
+    "해외영업에 결격",
+    "해외여행에 결격",
+    "남자의 경우 군필",
+    "병역필 또는 면제",
+    "보훈대상자 우대",
+    "취업보호대상자",
+    "장애인 우대",
+    "즉시출근",
+    "근무지 인근 거주자",
+    "채용 시 마감",
+    "이력(경력) 능력 보유자",
+    "보훈 대상자",
+    "국가 보훈",
 ]
 
 
@@ -159,12 +195,6 @@ def save_json(path: Path, payload: dict) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-def select_images_for_ocr(source_images: list[Path], max_images: int = 3) -> list[Path]:
-    if len(source_images) <= max_images:
-        return source_images
-    return source_images[:max_images]
-
-
 def trim_raw_text_noise(raw_text: str) -> str:
     text = (raw_text or "").strip()
     if not text:
@@ -176,6 +206,66 @@ def trim_raw_text_noise(raw_text: str) -> str:
         if idx != -1 and idx < cut_idx:
             cut_idx = idx
     return text[:cut_idx].strip()
+
+
+def _compact(text: str) -> str:
+    """공백 제거 정규화 — OCR 자간 노이즈 대응용 (매칭 전용, 원문 수정 아님)"""
+    return re.sub(r"\s+", "", text)
+
+
+def clean_job_posting_text(raw_text: str, source_site: str = "") -> str:
+    """
+    raw_text에서 UI 노이즈를 제거한 정제본을 반환한다.
+    raw_text 원본은 수정하지 않는다 — 이 함수의 반환값만 분석/판정에 활용해라.
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+
+    site = (source_site or "").lower()
+
+    site_specific: list[str] = []
+    if site == "jobkorea":
+        site_specific = UI_NOISE_LINE_KEYWORDS_JOBKOREA
+    elif site == "saramin":
+        site_specific = UI_NOISE_LINE_KEYWORDS_SARAMIN
+    all_line_noise = UI_NOISE_LINE_KEYWORDS + site_specific
+    compact_noise = [_compact(kw.lower()) for kw in all_line_noise]
+
+    clean_lines = []
+    for line in text.splitlines():
+        line_lower = line.lower()
+        compact_line = _compact(line_lower)
+        if any(kw.lower() in line_lower for kw in all_line_noise):
+            continue
+        if any(cnoise in compact_line for cnoise in compact_noise):
+            continue
+        clean_lines.append(line)
+
+    return "\n".join(clean_lines).strip()
+
+
+def is_low_value_requirement_line(text: str) -> bool:
+    """
+    requirements / preferred / main_tasks 한 줄이 직무 기준 생성에 무가치한지 판정한다.
+    빈 줄 또는 LOW_VALUE_LINE_PATTERNS 해당 시에만 제거한다.
+    """
+    line = (text or "").strip()
+    if not line:
+        return True
+
+    line_lower = line.lower()
+    return any(pattern.lower() in line_lower for pattern in LOW_VALUE_LINE_PATTERNS)
+
+
+def filter_low_value_lines(lines: list[str]) -> list[str]:
+    """
+    requirements / preferred / main_tasks 리스트에서 저가치 문장을 제거한 리스트를 반환한다.
+    원본 리스트는 수정하지 않는다.
+    """
+    if not isinstance(lines, list):
+        return []
+    return [line for line in lines if not is_low_value_requirement_line(line)]
 
 
 class GeminiQuotaExceededError(RuntimeError):
@@ -281,19 +371,77 @@ def detect_core_sections(raw_text: str) -> list[str]:
     return detected
 
 
-def assess_capture_failed(raw_text: str, capture_image_count: int) -> tuple[bool, list[str], list[str]]:
+# 소프트 경고를 bypass할 수 있는 본문 전용 locator 선택자
+_BODY_LOCATOR_SELECTORS = {".artRead", ".detail", "iframe:body"}
+
+
+def _is_body_locator_capture(capture_meta: dict) -> tuple[bool, str]:
+    """iframe/본문 locator 캡처가 사용됐는지 확인. (bypass 여부, bypass 사유) 반환."""
+    if capture_meta.get("iframe_capture_used"):
+        return True, "iframe_body"
+    selector = str(capture_meta.get("locator_capture_selector", "") or "")
+    if selector in _BODY_LOCATOR_SELECTORS:
+        return True, "locator_body"
+    return False, ""
+
+
+def _has_structured_content(jd_payload: dict) -> bool:
+    """Gemini 구조화 결과에 유의미한 내용이 있는지 확인."""
+    for key in ("main_tasks", "requirements", "preferred"):
+        val = jd_payload.get(key, [])
+        if isinstance(val, list) and len(val) >= 2:
+            return True
+    return bool(str(jd_payload.get("role", "") or "").strip())
+
+
+def assess_capture_failed(
+    raw_text: str,
+    capture_image_count: int,
+    capture_meta: Optional[dict] = None,
+    jd_payload: Optional[dict] = None,
+) -> tuple[bool, list[str], list[str], list[str], str]:
+    """캡처 품질을 평가한다.
+
+    Returns:
+        hard_failed: True이면 저장 차단 (failed_capture)
+        hard_reasons: 하드 실패 사유 목록
+        soft_warns: 경고만, 저장 차단 안 함
+        detected_sections: 탐지된 핵심 섹션 키워드
+        gate_bypass_reason: one_image_short_text 조건이 bypass된 경우 그 사유 (없으면 "")
+
+    하드 실패 기준 (저장 차단):
+        - missing_core_sections: 핵심 섹션 탐지 없음 + 텍스트 200자 미만
+
+    소프트 경고 기준 (저장 통과, 로그만):
+        - one_image_short_text: 이미지 1장 이하 + 텍스트 900자 미만
+          단, iframe/본문 locator 캡처 사용 시 또는 Gemini 구조화 결과 유효 시 bypass
+    """
     text = (raw_text or "").strip()
     text_len = len(text)
     detected = detect_core_sections(text)
-    reasons: list[str] = []
+    hard_reasons: list[str] = []
+    soft_warns: list[str] = []
+    gate_bypass_reason = ""
 
-    if not detected and text_len < 300:
-        reasons.append("missing_core_sections")
+    # 하드 실패: 핵심 섹션 전혀 없고 텍스트도 거의 비어 있음
+    if not detected and text_len < 200:
+        hard_reasons.append("missing_core_sections")
 
+    # 소프트 경고 후보: 이미지 1장 이하 + 짧은 텍스트
     if capture_image_count <= 1 and text_len < 900:
-        reasons.append("one_image_short_text")
+        _meta = capture_meta or {}
+        _payload = jd_payload or {}
 
-    return (len(reasons) > 0), reasons, detected
+        bypassed, bypass_reason = _is_body_locator_capture(_meta)
+        if not bypassed and _has_structured_content(_payload):
+            bypassed, bypass_reason = True, "structured_content_present"
+
+        if bypassed:
+            gate_bypass_reason = bypass_reason
+        else:
+            soft_warns.append("one_image_short_text")
+
+    return (len(hard_reasons) > 0), hard_reasons, soft_warns, detected, gate_bypass_reason
 
 
 def _keyword_hit_count(text: str, keywords: list[str]) -> int:
@@ -313,11 +461,6 @@ def assess_low_quality_job(payload: dict) -> tuple[bool, list[str]]:
     if len(requirements) <= 1:
         reasons.append("too_few_requirements")
 
-    core_text = " ".join([str(x) for x in (main_tasks + requirements)])
-    tech_hits = _keyword_hit_count(core_text, TECH_KEYWORDS)
-    if tech_hits <= 1:
-        reasons.append("low_technical_signal")
-
     if len(preferred) >= 4 and len(main_tasks) <= 2 and len(requirements) <= 2:
         reasons.append("preferred_overweight")
 
@@ -330,7 +473,58 @@ def assess_low_quality_job(payload: dict) -> tuple[bool, list[str]]:
     return (len(reasons) >= 2), reasons
 
 
+def is_aggregate_posting(raw_text: str, structured_roles_count: int = 0) -> tuple[bool, list[str]]:
+    """집계형 공고(여러 회사/직무를 한 페이지에 모은 공고)를 휴리스틱으로 판별한다.
+
+    false positive를 최소화하기 위해 복수 신호가 동시에 발생할 때만 true 반환.
+    단, roles 수가 극단적으로 많은 경우에는 단독 신호로도 판정.
+    """
+    text = raw_text or ""
+    reasons: list[str] = []
+
+    apply_link_count = text.count("접수바로가기")
+    if apply_link_count >= 5:
+        reasons.append(f"접수바로가기_count={apply_link_count}")
+
+    # 일반 공고에도 등장할 수 있어 기준을 높게 설정
+    apply_btn_count = text.count("지원하기")
+    if apply_btn_count >= 10:
+        reasons.append(f"지원하기_count={apply_btn_count}")
+
+    if structured_roles_count >= 15:
+        reasons.append(f"roles_count={structured_roles_count}")
+
+    # 극단적인 경우 단독 신호로도 판정 (roles >= 30)
+    if structured_roles_count >= 30:
+        return True, reasons
+
+    return (len(reasons) >= 2), reasons
+
+
 def select_images_for_ocr(source_images: list[Path], max_images: int = 3) -> list[Path]:
     if len(source_images) <= max_images:
         return source_images
     return source_images[:max_images]
+
+
+def prepare_ocr_image(source: Path, dest: Path, max_width: int = 800) -> None:
+    """OCR용 이미지를 전처리하여 PNG로 저장한다.
+    처리 순서: 그레이스케일 → 너비 max_width 초과 시 비율 유지 리사이즈 → 대비 1.3배 강화
+    Pillow 미설치 또는 변환 실패 시 원본을 그대로 복사한다.
+    downstream이 PNG 기준이므로 저장 포맷은 PNG로 유지한다.
+    """
+    try:
+        from PIL import Image, ImageEnhance  # type: ignore[import]
+        img = Image.open(source).convert("L")
+        w, h = img.size
+        if w > max_width:
+            new_h = int(h * max_width / w)
+            img = img.resize((max_width, new_h), Image.LANCZOS)
+        img = ImageEnhance.Contrast(img).enhance(1.3)
+        dest_png = dest.with_suffix(".png")
+        img.save(dest_png, format="PNG")
+        if dest_png != dest:
+            dest_png.rename(dest)
+    except Exception:
+        import shutil
+        shutil.copy2(source, dest)

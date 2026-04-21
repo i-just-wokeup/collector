@@ -19,6 +19,17 @@ DEFAULT_DB_PATH = r"C:\dev\jd_data.db"
 DEFAULT_SITE = "jobkorea"
 SUPPORTED_SITES = ("jobkorea", "saramin")
 
+CATEGORY_OPTIONS: list[tuple[str, str]] = [
+    ("개발 (소프트웨어)", "software"),
+    ("엔지니어링 (기계/전기/화학)", "engineering"),
+    ("기획/전략", "planning_strategy"),
+    ("마케팅/광고", "marketing"),
+    ("디자인", "design"),
+    ("영업/제휴", "sales"),
+    ("경영지원 (HR/재무/법무)", "business_support"),
+    ("운영/서비스 (물류/고객)", "operations_service"),
+]
+
 
 def _resolve_path(raw_path: str) -> Path:
     windows_path = PureWindowsPath(raw_path)
@@ -127,6 +138,7 @@ class CollectorGUI:
 
         self.site_var = StringVar(value=DEFAULT_SITE)
         self.keyword_var = StringVar()
+        self.category_var = StringVar(value=CATEGORY_OPTIONS[0][1])
         self.target_count_var = StringVar(value="10")
         self.db_status_var = StringVar()
         self.run_status_var = StringVar(value="대기 중")
@@ -157,19 +169,37 @@ class CollectorGUI:
         )
         self.site_combo.grid(row=0, column=1, sticky="w", pady=4)
 
-        ttk.Label(input_frame, text="검색어").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.keyword_entry = ttk.Entry(input_frame, textvariable=self.keyword_var)
-        self.keyword_entry.grid(row=1, column=1, sticky="ew", pady=4)
+        self._category_label = ttk.Label(input_frame, text="카테고리")
+        self._category_label.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        category_display_names = [name for name, _ in CATEGORY_OPTIONS]
+        self.category_combo = ttk.Combobox(
+            input_frame,
+            values=category_display_names,
+            state="readonly",
+        )
+        self.category_combo.current(0)
+        self.category_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        self.category_combo.bind("<<ComboboxSelected>>", self._on_category_selected)
 
-        ttk.Label(input_frame, text="목표 수").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self._keyword_label = ttk.Label(input_frame, text="검색어")
+        self._keyword_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.keyword_entry = ttk.Entry(input_frame, textvariable=self.keyword_var)
+        self.keyword_entry.grid(row=2, column=1, sticky="ew", pady=4)
+        self._keyword_label.grid_remove()
+        self.keyword_entry.grid_remove()
+
+        ttk.Label(input_frame, text="목표 수").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         self.target_count_entry = ttk.Entry(input_frame, textvariable=self.target_count_var, width=16)
-        self.target_count_entry.grid(row=2, column=1, sticky="w", pady=4)
+        self.target_count_entry.grid(row=3, column=1, sticky="w", pady=4)
 
         button_frame = ttk.Frame(frame)
         button_frame.pack(fill="x", pady=(12, 0))
 
         self.collect_button = ttk.Button(button_frame, text="수집 시작", command=self.start_collect)
         self.collect_button.pack(side="left")
+
+        self.login_button = ttk.Button(button_frame, text="로그인", command=self.start_login)
+        self.login_button.pack(side="left", padx=(8, 0))
 
         self.classify_button = ttk.Button(button_frame, text="직무 분류", command=self.start_classify)
         self.classify_button.pack(side="left", padx=(8, 0))
@@ -184,6 +214,11 @@ class CollectorGUI:
 
         self.log_widget = scrolledtext.ScrolledText(log_frame, wrap="word", height=28, state="disabled")
         self.log_widget.pack(fill="both", expand=True)
+
+    def _on_category_selected(self, _event: object = None) -> None:
+        idx = self.category_combo.current()
+        if idx >= 0:
+            self.category_var.set(CATEGORY_OPTIONS[idx][1])
 
     def append_log(self, message: str) -> None:
         self.log_widget.configure(state="normal")
@@ -205,9 +240,11 @@ class CollectorGUI:
     def set_buttons_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         self.collect_button.configure(state=state)
+        self.login_button.configure(state=state)
         self.classify_button.configure(state=state)
         self.analyze_button.configure(state=state)
         self.site_combo.configure(state="readonly" if enabled else "disabled")
+        self.category_combo.configure(state="readonly" if enabled else "disabled")
         self.keyword_entry.configure(state=state)
         self.target_count_entry.configure(state=state)
 
@@ -216,30 +253,63 @@ class CollectorGUI:
             return
 
         site_name = self.site_var.get().strip()
-        search_keyword = self.keyword_var.get().strip()
+        category_id = self.category_var.get().strip()
         target_count_text = self.target_count_var.get().strip()
 
         if site_name not in SUPPORTED_SITES:
             self.append_log("[WARN] site_name must be jobkorea or saramin\n")
             return
-        if not search_keyword:
-            self.append_log("[WARN] search_keyword is required\n")
+        if not category_id:
+            self.append_log("[WARN] category is required\n")
             return
         if not target_count_text.isdigit() or int(target_count_text) <= 0:
             self.append_log("[WARN] target_count must be a positive integer\n")
             return
 
-        stdin_payload = f"{site_name}\n{search_keyword}\n{target_count_text}\n\n"
         context = {
             "site_name": site_name,
-            "search_keyword": search_keyword,
+            "category_id": category_id,
             "target_count": target_count_text,
         }
         self._run_script(
             stage_label="수집 시작",
-            command=[self.python_exec, "-u", "src/collect.py"],
-            stdin_payload=stdin_payload,
+            command=[
+                self.python_exec, "-u", "src/collect.py",
+                "--category", category_id,
+                "--target-count", target_count_text,
+                "--site", site_name,
+            ],
+            stdin_payload="",
             context=context,
+        )
+
+    def start_login(self) -> None:
+        if self.is_running:
+            return
+
+        site_name = self.site_var.get().strip()
+        category_id = self.category_var.get().strip()
+
+        if site_name not in SUPPORTED_SITES:
+            self.append_log("[WARN] site_name must be jobkorea or saramin\n")
+            return
+
+        command = [
+            self.python_exec, "-u", "src/collect.py",
+            "--login-only",
+            "--site", site_name,
+        ]
+        if category_id:
+            command.extend(["--category", category_id])
+
+        self._run_script(
+            stage_label="로그인 창 열기",
+            command=command,
+            stdin_payload="",
+            context={
+                "site_name": site_name,
+                "category_id": category_id,
+            },
         )
 
     def start_classify(self) -> None:
@@ -377,20 +447,21 @@ class CollectorGUI:
         ]
         if stage_label == "수집 시작":
             lines.append(f"site={context.get('site_name', '')}")
-            lines.append(f"keyword={context.get('search_keyword', '')}")
+            lines.append(f"category={context.get('category_id', '')}")
             lines.append(f"target_count={context.get('target_count', '')}")
         if stage_label == "직무 분류":
             lines.append(f"직무별 분류={counts['job_family_telegram_line']}")
 
         telegram_message = "\n".join(lines)
-        try:
-            sent, info = _send_telegram_message(telegram_message)
-            if sent:
-                self.append_log("[INFO] telegram_notification_sent=true\n")
-            else:
-                self.append_log(f"[WARN] telegram_notification_sent=false reason={info}\n")
-        except Exception as err:
-            self.append_log(f"[WARN] telegram_notification_sent=false reason={err}\n")
+        if stage_label != "로그인 창 열기":
+            try:
+                sent, info = _send_telegram_message(telegram_message)
+                if sent:
+                    self.append_log("[INFO] telegram_notification_sent=true\n")
+                else:
+                    self.append_log(f"[WARN] telegram_notification_sent=false reason={info}\n")
+            except Exception as err:
+                self.append_log(f"[WARN] telegram_notification_sent=false reason={err}\n")
 
 
 def main() -> None:

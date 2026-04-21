@@ -1,6 +1,18 @@
+import re
+
 from playwright.sync_api import Page
 
 from sites.base import SiteAdapter, find_by_patterns, text_or_empty
+
+_GI_READ_RE = re.compile(r"/Recruit/GI_Read/(\d+)", re.IGNORECASE)
+
+
+def normalize_jobkorea_url(url: str) -> str:
+    """쿼리스트링을 제거하고 /Recruit/GI_Read/{id} 기준 정규 URL을 반환한다."""
+    m = _GI_READ_RE.search(url)
+    if m:
+        return f"https://www.jobkorea.co.kr/Recruit/GI_Read/{m.group(1)}"
+    return url
 
 
 class JobKoreaAdapter(SiteAdapter):
@@ -8,6 +20,12 @@ class JobKoreaAdapter(SiteAdapter):
 
     def build_search_url(self, keyword: str) -> str:
         return f"https://www.jobkorea.co.kr/Search/?stext={self.keyword_query(keyword)}"
+
+    def build_top100_category_url(self, biz_code: int) -> str:
+        return (
+            f"https://www.jobkorea.co.kr/Top100/"
+            f"?Main_Career_Type=1&Search_Type=1&BizJobtype_Bctgr_Code={biz_code}"
+        )
 
     def make_absolute_url(self, href: str) -> str:
         if href.startswith("http"):
@@ -42,9 +60,10 @@ class JobKoreaAdapter(SiteAdapter):
         links: list[str] = []
         seen = set()
         for href in hrefs:
-            url = self.make_absolute_url(href)
-            if "/Recruit/GI_Read/" not in url:
+            raw_url = self.make_absolute_url(href)
+            if "/Recruit/GI_Read/" not in raw_url:
                 continue
+            url = normalize_jobkorea_url(raw_url)
             if url in seen:
                 continue
             seen.add(url)

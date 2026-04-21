@@ -1,5 +1,6 @@
+import copy
+import json
 import os
-import shutil
 from pathlib import Path, PureWindowsPath
 
 from playwright.sync_api import sync_playwright
@@ -10,6 +11,7 @@ from db import (
     get_posting_count,
     is_seen_url,
     save_job_posting,
+    save_job_posting_roles,
     save_job_sections,
 )
 from runner import generate_jd_json_from_png_folder, generate_jd_json_from_text
@@ -18,13 +20,17 @@ from utils import (
     assess_capture_failed,
     assess_low_quality_job,
     append_seen_url,
+    clean_job_posting_text,
     detect_core_sections,
     ensure_dir,
     ensure_enriched_schema,
+    filter_low_value_lines,
+    is_aggregate_posting,
     is_gemini_quota_error,
     load_seen_urls,
     now_iso,
     now_stamp,
+    prepare_ocr_image,
     save_json,
     select_images_for_ocr,
     slugify,
@@ -34,6 +40,12 @@ from utils import (
 
 DEFAULT_DB_PATH = r"C:\dev\jd_data.db"
 DEFAULT_JD_RESEARCH_TOOL_PATH = r"C:\dev\jd-research-tool"
+DEFAULT_TOP8_FAMILIES_PATH = str(
+    (Path(__file__).resolve().parent.parent / "job_families_top8.json")
+)
+DEFAULT_BROWSER_PROFILE_ROOT = str(
+    (Path(__file__).resolve().parent.parent / "output" / "browser_profiles")
+)
 SUPPORTED_SITE_NAMES = {"jobkorea", "saramin"}
 
 
@@ -58,16 +70,118 @@ def build_filtered_search_url(site_name: str, search_keyword: str) -> str:
     raise ValueError("site_name must be one of: jobkorea, saramin")
 
 
+def load_top8_category_codes(
+    category_id: str,
+    top8_families_path: str = DEFAULT_TOP8_FAMILIES_PATH,
+) -> list[int]:
+    families_path = resolve_path(top8_families_path)
+    with families_path.open("r", encoding="utf-8") as f:
+        families = json.load(f)
+    for item in families:
+        if item.get("id") == category_id:
+            return [int(c) for c in item.get("jobkorea_top100_codes", [])]
+    raise ValueError(f"category_id '{category_id}' not found in {top8_families_path}")
+
+
+def build_browser_profile_dir(
+    site_name: str,
+    browser_profile_root: str = DEFAULT_BROWSER_PROFILE_ROOT,
+) -> Path:
+    profile_root = resolve_path(browser_profile_root)
+    profile_dir = profile_root / slugify(site_name)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return profile_dir
+
+
+def build_login_entry_url(
+    site_name: str,
+    category_id: str = "",
+    top8_families_path: str = DEFAULT_TOP8_FAMILIES_PATH,
+) -> str:
+    adapter = get_site_adapter(site_name)
+
+    if site_name == "jobkorea":
+        if category_id:
+            biz_codes = load_top8_category_codes(category_id, top8_families_path)
+            return adapter.build_top100_category_url(biz_codes[0])
+        return "https://www.jobkorea.co.kr/Top100/"
+
+    if site_name == "saramin":
+        return adapter.build_search_url("신입")
+
+    return adapter.build_search_url("채용")
+
+
+def open_login_browser(
+    site_name: str,
+    category_id: str = "",
+    top8_families_path: str = DEFAULT_TOP8_FAMILIES_PATH,
+    browser_profile_root: str = DEFAULT_BROWSER_PROFILE_ROOT,
+) -> None:
+    browser_profile_dir = build_browser_profile_dir(site_name, browser_profile_root)
+    entry_url = build_login_entry_url(site_name, category_id, top8_families_path)
+
+    print(f"[INFO] login_browser_open=true")
+    print(f"[INFO] site_name={site_name}")
+    if category_id:
+        print(f"[INFO] category_id={category_id}")
+    print(f"[INFO] browser_profile_dir={browser_profile_dir}")
+    print(f"[INFO] entry_url={entry_url}")
+    print("[INFO] complete_login_in_opened_browser_if_needed=true")
+    print("[INFO] close_browser_window_when_login_is_done=true")
+
+    pw = sync_playwright().start()
+    context = pw.chromium.launch_persistent_context(
+        user_data_dir=str(browser_profile_dir),
+        headless=False,
+        viewport={"width": 1600, "height": 2000},
+    )
+
+    try:
+        if context.pages:
+            page = context.pages[0]
+        else:
+            page = context.new_page()
+
+        page.goto(entry_url, wait_until="domcontentloaded")
+
+        while True:
+            if not context.pages:
+                break
+            context.pages[0].wait_for_timeout(1000)
+    except Exception:
+        pass
+    finally:
+        try:
+            context.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
 def run_collection(
     site_name: str,
     search_keyword: str,
     target_count: int,
     jd_research_tool_path: str = DEFAULT_JD_RESEARCH_TOOL_PATH,
+    category_id: str = "",
+    top8_families_path: str = DEFAULT_TOP8_FAMILIES_PATH,
+    browser_profile_root: str = DEFAULT_BROWSER_PROFILE_ROOT,
 ) -> None:
+    use_category_mode = bool(category_id)
+
     base_dir = Path(__file__).resolve().parent.parent
     raw_dir = base_dir / "output" / "raw_captures"
-    failed_capture_dir = base_dir / "output" / "failed_capture" / f"{site_name}_{slugify(search_keyword)[:40]}"
-    low_quality_dir = base_dir / "output" / "low_quality" / f"{site_name}_{slugify(search_keyword)[:40]}"
+    browser_profile_dir = build_browser_profile_dir(site_name, browser_profile_root)
+    profile_has_state = any(browser_profile_dir.iterdir())
+
+    if use_category_mode:
+        slug = slugify(category_id)[:40]
+    else:
+        slug = slugify(search_keyword)[:40]
+
+    failed_capture_dir = base_dir / "output" / "failed_capture" / f"{site_name}_{slug}"
+    low_quality_dir = base_dir / "output" / "low_quality" / f"{site_name}_{slug}"
     quota_stop_dir = base_dir / "output" / "quota_stop"
     seen_path = base_dir / "output" / "seen_urls.txt"
     jd_research_tool_root = resolve_path(jd_research_tool_path)
@@ -77,21 +191,39 @@ def run_collection(
         ensure_dir(directory)
 
     adapter = get_site_adapter(site_name)
-    search_url = build_filtered_search_url(adapter.site_name, search_keyword)
-    output_job_folder_name = f"{adapter.site_name}_{slugify(search_keyword)[:40]}"
+    output_job_folder_name = f"{adapter.site_name}_{slug}"
     seen_urls = load_seen_urls(seen_path)
     saved_count = 0
     processed_count = 0
+
+    # 수집 진입 URL 결정
+    if use_category_mode:
+        if site_name != "jobkorea":
+            raise ValueError("category_id 기반 수집은 현재 jobkorea만 지원합니다.")
+        biz_codes = load_top8_category_codes(category_id, top8_families_path)
+        entry_urls = [adapter.build_top100_category_url(code) for code in biz_codes]
+    else:
+        entry_urls = [build_filtered_search_url(adapter.site_name, search_keyword)]
 
     conn = get_db_connection(db_path)
     current_posting_count = get_posting_count(conn)
 
     print(f"[INFO] site_name={adapter.site_name}")
-    print(f"[INFO] search_keyword={search_keyword}")
+    if use_category_mode:
+        print(f"[INFO] category_id={category_id}")
+        print(f"[INFO] entry_urls={entry_urls}")
+    else:
+        print(f"[INFO] search_keyword={search_keyword}")
+        print(f"[INFO] entry_urls={entry_urls}")
     print(f"[INFO] target_count={target_count}")
     print(f"[INFO] db_path={db_path}")
+    print(f"[INFO] browser_profile_dir={browser_profile_dir}")
+    print(f"[INFO] browser_profile_has_state={str(profile_has_state).lower()}")
+    if not profile_has_state:
+        print("[INFO] first_run_browser_profile_created=true")
+        print("[INFO] opened_browser_profile_is_empty=true")
+        print("[INFO] login_in_opened_browser_if_needed_and_profile_will_be_reused=true")
     print(f"[INFO] current_posting_count={current_posting_count}")
-    print(f"[INFO] search_url={search_url}")
 
     def stop_for_quota(error: Exception) -> None:
         print("[ERROR] Gemini quota exceeded. Pipeline stopped.")
@@ -102,7 +234,8 @@ def run_collection(
             "processed_count": processed_count,
             "saved_count": saved_count,
             "site_name": adapter.site_name,
-            "search_keyword": search_keyword,
+            "search_keyword": search_keyword if not use_category_mode else "",
+            "category_id": category_id,
             "db_path": db_path,
             "error_message": str(error),
         }
@@ -110,15 +243,32 @@ def run_collection(
         save_json(quota_path, quota_meta)
         print(f"[INFO] saved_quota_stop={quota_path}")
 
-    max_links = max(target_count * 12, 40)
+    # Top100 카테고리 페이지는 최대 100건 표시 → 여유 있게 max_links 설정
+    # 복수 URL이 있는 카테고리는 URL당 max_links를 수집 후 합산
+    max_links_per_url = max(target_count * 6, 120) if use_category_mode else max(target_count * 12, 40)
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=False)
-    context = browser.new_context(viewport={"width": 1600, "height": 2000})
-    page = context.new_page()
+    context = pw.chromium.launch_persistent_context(
+        user_data_dir=str(browser_profile_dir),
+        headless=False,
+        viewport={"width": 1600, "height": 2000},
+    )
+    if context.pages:
+        page = context.pages[0]
+    else:
+        page = context.new_page()
 
     try:
-        job_links = adapter.collect_job_links(page, search_url, max_links=max_links)
+        # 모든 진입 URL에서 링크 수집 후 합산 (중복 제거)
+        job_links: list[str] = []
+        seen_links: set[str] = set()
+        for entry_url in entry_urls:
+            print(f"[INFO] collecting_links_from={entry_url}")
+            links = adapter.collect_job_links(page, entry_url, max_links=max_links_per_url)
+            for link in links:
+                if link not in seen_links:
+                    seen_links.add(link)
+                    job_links.append(link)
         print(f"[INFO] collected_job_links={len(job_links)}")
 
         if not job_links:
@@ -158,7 +308,10 @@ def run_collection(
                 print(f"[INFO] url={link}")
                 print(f"[INFO] capture_images={meta.get('capture_count', 0)}")
                 print(f"[INFO] first_capture_saved={str(meta.get('first_capture_saved', False)).lower()}")
-                print(f"[INFO] body_locator_found={str(meta.get('body_locator_found', False)).lower()}")
+                print(f"[INFO] locator_capture_used={str(meta.get('locator_capture_used', False)).lower()}")
+                print(f"[INFO] locator_capture_selector={meta.get('locator_capture_selector', '')}")
+                print(f"[INFO] iframe_capture_used={str(meta.get('iframe_capture_used', False)).lower()}")
+                print(f"[INFO] iframe_url={meta.get('iframe_url', '')}")
                 print(f"[INFO] company={meta.get('company', '')}")
                 print(f"[INFO] seniority_text={meta.get('seniority_text', '')}")
                 print(f"[INFO] seniority_text_source={meta.get('seniority_text_source', 'fallback')}")
@@ -192,7 +345,7 @@ def run_collection(
             ocr_input_dir = raw_dir / job_id / "ocr_input"
             ensure_dir(ocr_input_dir)
             for image_path in ocr_images:
-                shutil.copy2(image_path, ocr_input_dir / image_path.name)
+                prepare_ocr_image(image_path, ocr_input_dir / image_path.name)
             print(f"[INFO] capture_images_count={len(all_source_images)}")
             print(f"[INFO] ocr_used_images_count={len(ocr_images)}")
 
@@ -217,6 +370,7 @@ def run_collection(
                     if is_gemini_quota_error(err):
                         stop_for_quota(err)
                         return
+                    print(f"[WARN] dom_extraction_failed=true reason={type(err).__name__}: {err}")
                     dom_extraction_used = False
 
             print(f"[INFO] dom_extraction_used={str(dom_extraction_used).lower()}")
@@ -238,26 +392,57 @@ def run_collection(
                     seen_urls.add(link)
                     continue
 
+            structured_jd_payload = copy.deepcopy(jd_payload)
+            structured_jd_payload["raw_text"] = trim_raw_text_noise(
+                str(structured_jd_payload.get("raw_text", "") or "")
+            )
+            structured_roles = structured_jd_payload.get("roles", [])
+            structured_roles_count = len(structured_roles) if isinstance(structured_roles, list) else 0
+            print(f"[INFO] structured_roles_count={structured_roles_count}")
+
+            is_aggregate, aggregate_reasons = is_aggregate_posting(dom_raw_text, structured_roles_count)
+            if is_aggregate:
+                print(f"[WARN] aggregate_posting_detected=true reasons={','.join(aggregate_reasons)}")
+                jd_payload["aggregate_candidate"] = True
+                jd_payload["aggregate_reasons"] = aggregate_reasons
+            else:
+                jd_payload["aggregate_candidate"] = False
+
             jd_payload["raw_text"] = trim_raw_text_noise(str(jd_payload.get("raw_text", "") or ""))
             source_images = [path.name for path in all_source_images]
+            # raw_text: DB 저장용 원본 (trim_raw_text_noise만 적용)
+            # cleaned_raw_text: 판정/분석용 정제본 (UI 노이즈 추가 제거) — DB에는 저장하지 않음
             raw_text = str(jd_payload.get("raw_text", "") or "")
+            cleaned_raw_text = clean_job_posting_text(raw_text, adapter.site_name)
+            print(f"[INFO] raw_text_len={len(raw_text)} cleaned_raw_text_len={len(cleaned_raw_text)}")
             capture_image_count = len(source_images)
-            detected_core_sections = detect_core_sections(raw_text)
+            # 섹션 탐지와 캡처 실패 판정은 cleaned_raw_text 기준으로 수행
+            detected_core_sections = detect_core_sections(cleaned_raw_text)
             print(f"[INFO] capture_image_count={capture_image_count}")
-            print(f"[INFO] detected_core_sections={detected_core_sections}")
+            print(f"[INFO] detected_core_sections(cleaned)={detected_core_sections}")
 
-            capture_failed, capture_fail_reasons, detected_core_sections = assess_capture_failed(
-                raw_text=raw_text,
-                capture_image_count=capture_image_count,
+            hard_failed, hard_reasons, soft_warns, detected_core_sections, gate_bypass_reason = (
+                assess_capture_failed(
+                    raw_text=cleaned_raw_text,
+                    capture_image_count=capture_image_count,
+                    capture_meta=meta,
+                    jd_payload=jd_payload,
+                )
             )
-            print(f"[INFO] capture_failed={str(capture_failed).lower()}")
-            if capture_failed:
-                print(f"[WARN] capture_failed=true reason={','.join(capture_fail_reasons)}")
+
+            if gate_bypass_reason:
+                print(f"[INFO] capture_gate_bypass={gate_bypass_reason}")
+            if soft_warns:
+                print(f"[INFO] capture_gate_reason=soft_warn:{','.join(soft_warns)}")
+            print(f"[INFO] capture_failed={str(hard_failed).lower()}")
+
+            if hard_failed:
+                print(f"[WARN] capture_gate_reason=hard_fail:{','.join(hard_reasons)}")
                 fail_meta = {
                     "job_id": job_id,
                     "source_url": link,
                     "site_name": adapter.site_name,
-                    "reason": capture_fail_reasons[0] if capture_fail_reasons else "capture_failed",
+                    "reason": hard_reasons[0] if hard_reasons else "capture_failed",
                     "capture_image_count": capture_image_count,
                     "detected_keywords": detected_core_sections,
                     "saved_at": now_iso(),
@@ -287,6 +472,16 @@ def run_collection(
                 job_id=job_id,
             )
 
+            # 저가치 문장 필터링 — DB 저장 전 섹션 정제 (raw_text 원본은 별도 보존)
+            for section_key in ("main_tasks", "requirements", "preferred"):
+                original_lines = jd_payload.get(section_key, [])
+                if isinstance(original_lines, list):
+                    filtered_lines = filter_low_value_lines(original_lines)
+                    removed = len(original_lines) - len(filtered_lines)
+                    if removed > 0:
+                        print(f"[INFO] filtered_{section_key}_lines={removed}")
+                    jd_payload[section_key] = filtered_lines
+
             low_quality_job, low_quality_reasons = assess_low_quality_job(jd_payload)
             print(f"[INFO] low_quality_job={str(low_quality_job).lower()}")
             if low_quality_job:
@@ -315,6 +510,7 @@ def run_collection(
                 "seniority_text": str(meta.get("seniority_text", "") or ""),
                 "employment_type": str(meta.get("employment_type", "") or ""),
                 "raw_text": raw_text,
+                "source_category": category_id,
                 "captured_at": str(jd_payload.get("collector_meta", {}).get("captured_at", "") or now_iso()),
                 "classification_status": "pending",
                 "created_at": now_iso(),
@@ -323,6 +519,14 @@ def run_collection(
             try:
                 save_job_posting(conn, posting)
                 save_job_sections(conn, job_id, jd_payload)
+                # 역할별 저장은 원본 structured payload를 기준으로 처리한다.
+                # 현재 normalized payload는 레거시 단일 role 흐름용이라
+                # roles/common_* 필드를 완전히 보존하지 못한다.
+                roles_saved = save_job_posting_roles(conn, job_id, structured_jd_payload)
+                if roles_saved > 0:
+                    print(f"[INFO] saved_roles={roles_saved} job_id={job_id}")
+                elif structured_jd_payload.get("roles"):
+                    print(f"[INFO] roles_already_complete job_id={job_id}")
                 conn.commit()
             except Exception as err:
                 conn.rollback()
@@ -347,7 +551,6 @@ def run_collection(
     finally:
         page.close()
         context.close()
-        browser.close()
         pw.stop()
         conn.close()
 
@@ -359,6 +562,39 @@ def prompt_with_default(message: str, default: str = "") -> str:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--category", default="")
+    parser.add_argument("--target-count", type=int, default=0)
+    parser.add_argument("--site", default="jobkorea")
+    parser.add_argument("--login-only", action="store_true")
+    known, _ = parser.parse_known_args()
+
+    if known.login_only:
+        if known.site not in SUPPORTED_SITE_NAMES:
+            raise ValueError(f"--site must be one of: {', '.join(SUPPORTED_SITE_NAMES)}")
+        open_login_browser(
+            site_name=known.site,
+            category_id=known.category,
+        )
+        return
+
+    if known.category:
+        # 카테고리 모드: 프롬프트 없이 인수로 바로 실행
+        if known.site not in SUPPORTED_SITE_NAMES:
+            raise ValueError(f"--site must be one of: {', '.join(SUPPORTED_SITE_NAMES)}")
+        if known.target_count <= 0:
+            raise ValueError("--target-count must be a positive integer")
+        run_collection(
+            site_name=known.site,
+            search_keyword="",
+            target_count=known.target_count,
+            category_id=known.category,
+        )
+        return
+
+    # 키워드 모드: 기존 stdin 프롬프트 흐름 (GUI 호환)
     site_name = prompt_with_default("site_name (jobkorea|saramin)").lower()
     if site_name not in SUPPORTED_SITE_NAMES:
         raise ValueError("site_name must be one of: jobkorea, saramin")

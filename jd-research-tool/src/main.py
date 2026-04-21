@@ -50,9 +50,13 @@ def main() -> None:
         with output_path.open("w", encoding="utf-8") as f:
             json.dump(structured, f, ensure_ascii=False, indent=2)
 
+        roles = structured.get("roles", [])
         print(f"\n✓ Saved structured JD JSON to: {output_path}")
         print(f"  회사: {structured['company']}")
-        print(f"  직급: {structured['role']}")
+        print(f"  공고 제목: {structured.get('posting_title', '')}")
+        print(f"  모집 role 수: {len(roles)}")
+        for idx, r in enumerate(roles, start=1):
+            print(f"  role[{idx}]: {r.get('role_name', '')}")
     except Exception as error:
         print(f"[ERROR] {error}")
 

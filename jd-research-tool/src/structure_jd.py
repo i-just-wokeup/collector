@@ -15,7 +15,6 @@ def _strip_json_code_fence(content: str) -> str:
 
 
 def _escape_invalid_backslashes(content: str) -> str:
-    # Escape only backslashes that are not valid JSON escape starters.
     return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", content)
 
 
@@ -38,21 +37,62 @@ def _as_list(value) -> list:
     return [value]
 
 
-def _normalize_schema(data: dict, raw_text: str) -> dict:
+def _normalize_schema(data: dict, raw_text: str = "") -> dict:
+    # 새 스키마: roles 배열 정규화
+    roles_raw = data.get("roles", [])
+    if not isinstance(roles_raw, list):
+        roles_raw = []
+
+    roles = []
+    for r in roles_raw:
+        if not isinstance(r, dict):
+            continue
+        roles.append({
+            "role_name": _as_string(r.get("role_name", "")),
+            "main_tasks": _as_list(r.get("main_tasks", [])),
+            "requirements": _as_list(r.get("requirements", [])),
+            "preferred": _as_list(r.get("preferred", [])),
+        })
+
+    # LLM이 구버전 스키마(role/main_tasks 최상위)로 응답한 경우 roles로 변환
+    if not roles and (data.get("role") or data.get("main_tasks")):
+        roles = [{
+            "role_name": _as_string(data.get("role", "")),
+            "main_tasks": _as_list(data.get("main_tasks", [])),
+            "requirements": _as_list(data.get("requirements", [])),
+            "preferred": _as_list(data.get("preferred", [])),
+        }]
+
+    common_requirements = _as_list(data.get("common_requirements", []))
+    common_preferred = _as_list(data.get("common_preferred", []))
+
+    # collect.py 연결 유지용 shim — 첫 번째 role + common 정보를 기존 키에 매핑
+    first_role = roles[0] if roles else {}
+    shim_role = _as_string(first_role.get("role_name", ""))
+    shim_main_tasks = _as_list(first_role.get("main_tasks", []))
+    shim_requirements = common_requirements + _as_list(first_role.get("requirements", []))
+    shim_preferred = common_preferred + _as_list(first_role.get("preferred", []))
+
     return {
         "company": _as_string(data.get("company", "")),
-        "role": _as_string(data.get("role", "")),
-        "main_tasks": _as_list(data.get("main_tasks", [])),
-        "requirements": _as_list(data.get("requirements", [])),
-        "preferred": _as_list(data.get("preferred", [])),
+        "posting_title": _as_string(data.get("posting_title", "")),
+        "common_requirements": common_requirements,
+        "common_preferred": common_preferred,
+        "roles": roles,
         "raw_text": _as_string(data.get("raw_text", raw_text), raw_text),
         "source_images": _as_list(data.get("source_images", [])),
+        # collect.py 호환 shim (기존 단일 role 읽기 경로 유지)
+        "role": shim_role,
+        "main_tasks": shim_main_tasks,
+        "requirements": shim_requirements,
+        "preferred": shim_preferred,
     }
 
 
 def structure_jd_text(raw_text: str) -> dict:
     """
     Convert OCR text to structured JD JSON using Gemini.
+    복합공고는 roles 배열로 분리, 공통 자격요건은 common_requirements로 추출.
     """
     load_dotenv()
 
@@ -67,13 +107,28 @@ def structure_jd_text(raw_text: str) -> dict:
 반드시 JSON 객체만 출력하세요. 코드블록은 사용하지 마세요.
 누락된 정보는 빈 문자열 또는 빈 배열로 채우세요.
 
+[구조화 규칙]
+1. 공고에 여러 모집부문·과제·트랙·직무 블록이 있으면 roles 배열에 각각 분리하세요. 절대 하나로 합치지 마세요.
+2. 단일 직무 공고라도 roles 배열에 1개 요소로 넣으세요.
+3. 모든 지원자에게 공통으로 적용되는 지원자격은 common_requirements에 넣으세요.
+4. 모든 지원자에게 공통으로 적용되는 우대사항은 common_preferred에 넣으세요.
+5. 특정 role에만 해당하는 자격요건·우대사항은 해당 role의 requirements·preferred에 넣으세요.
+6. role별 정보가 불명확하면 빈 배열을 허용합니다. 억지로 채우지 마세요.
+
 스키마:
 {{
-  "company": "",
-  "role": "",
-  "main_tasks": [],
-  "requirements": [],
-  "preferred": [],
+  "company": "회사명",
+  "posting_title": "공고 제목",
+  "common_requirements": ["공통 지원자격1", "공통 지원자격2"],
+  "common_preferred": ["공통 우대사항1"],
+  "roles": [
+    {{
+      "role_name": "직무/모집부문 명칭",
+      "main_tasks": ["담당업무1", "담당업무2"],
+      "requirements": ["이 직무 전용 자격요건1"],
+      "preferred": ["이 직무 전용 우대사항1"]
+    }}
+  ],
   "raw_text": "",
   "source_images": []
 }}

@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 
 from db import get_db_connection
-from utils import GeminiQuotaExceededError, is_gemini_quota_error
+from utils import GeminiQuotaExceededError, filter_low_value_lines, is_gemini_quota_error
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -197,6 +197,9 @@ def get_sections_by_family(
         text = str(row[3] or "").strip()
         if text:
             sections.append(text)
+
+    # 기존 DB 데이터 포함해 저가치 문장 제거 후 criteria 생성에 투입
+    sections = filter_low_value_lines(sections)
 
     _LAST_TOTAL_JOBS_BY_FAMILY[job_family] = total_jobs
     return sections, total_jobs
