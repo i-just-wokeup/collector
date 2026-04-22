@@ -8,8 +8,17 @@ from pathlib import Path, PureWindowsPath
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-from db import get_db_connection
-from utils import GeminiQuotaExceededError, filter_low_value_lines, is_gemini_quota_error
+from db import (
+    get_db_connection,
+    get_classified_families_from_roles,
+    get_roles_by_family_for_analyze,
+)
+from utils import (
+    GeminiQuotaExceededError,
+    filter_generic_analysis_lines,
+    filter_low_value_lines,
+    is_gemini_quota_error,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -514,24 +523,161 @@ def run_analyze(
     print(f"[DONE] processed_count={processed_count} skipped_count={skipped_count}")
 
 
-def prompt_with_default(message: str, default: str) -> str:
-    value = input(f"{message} [{default}]: ").strip()
-    return value or default
+def _roles_to_sections(roles: list[dict]) -> list[str]:
+    """roles 배열에서 분석용 섹션 텍스트 목록을 생성한다.
+
+    main_tasks > requirements > preferred 순으로 모으고,
+    GENERIC_ANALYSIS_FILTER_PATTERNS와 LOW_VALUE 패턴을 적용한다.
+    common_requirements/preferred는 보조 context로만 포함한다.
+    """
+    sections: list[str] = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        for key in ("main_tasks", "requirements", "preferred"):
+            val = role.get(key, [])
+            if isinstance(val, list):
+                sections.extend(str(x).strip() for x in val if str(x).strip())
+    # 분석 단계 전용 필터: 저직무구분력 + 저가치 문장 제거
+    sections = filter_generic_analysis_lines(sections)
+    sections = filter_low_value_lines(sections)
+    return sections
+
+
+def run_analyze_roles(
+    min_sample_count: int = 5,
+    db_path: str = DEFAULT_DB_PATH,
+    families_path: str = DEFAULT_JOB_FAMILIES_PATH,
+) -> None:
+    """role 단위 역량 분석 실행.
+
+    job_posting_role_tags에서 classified된 role들을 job_family별로 집계하고
+    직무별 핵심 기준과 키워드 빈도를 추출한다.
+    posting-level job_tags / job_sections에 의존하지 않는다.
+
+    수치 정의:
+        posting_count: DISTINCT job_id 기준 공고 수 → sample_count로 사용 (중복 집계 방지)
+        role_count: 실제 role 개수 → 로그 전용
+        min_sample_count 비교: posting_count 기준
+    """
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is required")
+
+    effective_db_path = os.getenv("JD_DB_PATH", db_path)
+    job_families = _load_job_families(families_path)
+    family_meta = {
+        str(item.get("id", "")).strip(): {
+            "display_name": str(item.get("display_name", "")).strip() or str(item.get("id", "")).strip(),
+        }
+        for item in job_families
+    }
+
+    conn = get_db_connection(effective_db_path)
+    processed_count = 0
+    skipped_count = 0
+
+    print(f"[INFO] analyze_mode=role_centric")
+    print(f"[INFO] min_sample_count={min_sample_count} (posting_count 기준)")
+    print(f"[INFO] db_path={effective_db_path}")
+    print(f"[INFO] gemini_model={os.getenv('GEMINI_MODEL', DEFAULT_GEMINI_MODEL)}")
+
+    try:
+        target_families = get_classified_families_from_roles(conn)
+        print(f"[INFO] classified_families_from_roles={len(target_families)}")
+
+        if not target_families:
+            print("[DONE] no classified role families.")
+            return
+
+        for job_family in target_families:
+            display_name = family_meta.get(job_family, {}).get("display_name", job_family)
+            # posting_count: DISTINCT job_id (복합공고 중복 집계 방지)
+            # role_count: 실제 role 수 (로그 전용)
+            roles, posting_count, role_count = get_roles_by_family_for_analyze(conn, job_family)
+            sections = _roles_to_sections(roles)
+
+            print(
+                f"[INFO] analyze_family={job_family} display_name={display_name} "
+                f"posting_count={posting_count} role_count={role_count} sections={len(sections)}"
+            )
+
+            # min_sample_count는 posting_count 기준으로 비교
+            if posting_count < min_sample_count:
+                skipped_count += 1
+                print(
+                    f"[SKIP] insufficient postings: job_family={job_family} "
+                    f"posting_count={posting_count} < min={min_sample_count}"
+                )
+                continue
+
+            if not sections:
+                skipped_count += 1
+                print(f"[SKIP] no sections found: job_family={job_family}")
+                continue
+
+            # count_keywords 비율 계산 기준: posting_count (공고 단위 분모)
+            # 복합공고 role이 여러 개여도 공고 1건으로 집계
+            _LAST_TOTAL_JOBS_BY_FAMILY[job_family] = posting_count
+
+            stats = count_keywords(
+                sections=sections,
+                job_family=job_family,
+                job_families=job_families,
+            )
+            save_criteria_stats(conn, job_family, stats)
+            conn.commit()
+            print(f"[INFO] criteria_stats_saved={len(stats)}")
+
+            try:
+                criteria_list = extract_job_criteria(
+                    sections=sections,
+                    job_family=job_family,
+                    display_name=display_name,
+                    sample_count=posting_count,  # 공고 수 기준
+                    api_key=api_key,
+                )
+            except GeminiQuotaExceededError as err:
+                conn.rollback()
+                skipped_count += 1
+                print(f"[SKIP] Gemini quota exceeded for {job_family}: {err}")
+                continue
+
+            save_job_criteria(
+                conn,
+                job_family=job_family,
+                criteria_list=criteria_list,
+                sample_count=posting_count,  # 공고 수 기준
+            )
+            conn.commit()
+            processed_count += 1
+            print(f"[INFO] job_criteria_saved={len(criteria_list)}")
+    finally:
+        conn.close()
+
+    print(f"[DONE] processed_count={processed_count} skipped_count={skipped_count}")
 
 
 def main() -> None:
+    import argparse
+
     load_dotenv()
-    min_sample_count_text = prompt_with_default("min_sample_count", "5")
-    if not min_sample_count_text.isdigit() or int(min_sample_count_text) <= 0:
-        raise ValueError("min_sample_count must be a positive integer")
-
     default_db_path = os.getenv("JD_DB_PATH", DEFAULT_DB_PATH)
-    db_path = prompt_with_default("db_path", default_db_path)
 
-    run_analyze(
-        min_sample_count=int(min_sample_count_text),
-        db_path=db_path,
-    )
+    parser = argparse.ArgumentParser(description="JD 역량 분석")
+    parser.add_argument("--mode", choices=["roles", "postings"], default="roles",
+                        help="분석 모드: roles(role 중심, 기본값) / postings(공고 레벨 레거시)")
+    parser.add_argument("--min-sample-count", type=int, default=5,
+                        help=f"최소 샘플 수 (기본값: 5, posting_count 기준)")
+    parser.add_argument("--db-path", default=default_db_path,
+                        help=f"DB 경로 (기본값: JD_DB_PATH 환경변수 또는 {DEFAULT_DB_PATH})")
+    args = parser.parse_args()
+
+    if args.mode == "roles":
+        run_analyze_roles(min_sample_count=args.min_sample_count, db_path=args.db_path)
+    else:
+        run_analyze(min_sample_count=args.min_sample_count, db_path=args.db_path)
 
 
 if __name__ == "__main__":

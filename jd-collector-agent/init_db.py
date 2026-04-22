@@ -84,17 +84,29 @@ CREATE TABLE IF NOT EXISTS criteria_stats (
 CREATE INDEX IF NOT EXISTS idx_criteria_stats_job_family ON criteria_stats(job_family);
 
 CREATE TABLE IF NOT EXISTS job_posting_roles (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  job_id            TEXT NOT NULL REFERENCES job_postings(id) ON DELETE CASCADE,
-  role_name         TEXT NOT NULL,
-  display_order     INTEGER NOT NULL DEFAULT 0,
-  main_tasks_json   TEXT NOT NULL DEFAULT '[]',
-  requirements_json TEXT NOT NULL DEFAULT '[]',
-  preferred_json    TEXT NOT NULL DEFAULT '[]',
-  created_at        TEXT NOT NULL,
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id                TEXT NOT NULL REFERENCES job_postings(id) ON DELETE CASCADE,
+  role_name             TEXT NOT NULL,
+  display_order         INTEGER NOT NULL DEFAULT 0,
+  main_tasks_json       TEXT NOT NULL DEFAULT '[]',
+  requirements_json     TEXT NOT NULL DEFAULT '[]',
+  preferred_json        TEXT NOT NULL DEFAULT '[]',
+  classification_status TEXT NOT NULL DEFAULT 'pending',
+  created_at            TEXT NOT NULL,
   UNIQUE(job_id, display_order)
 );
 CREATE INDEX IF NOT EXISTS idx_job_posting_roles_job_id ON job_posting_roles(job_id);
+
+CREATE TABLE IF NOT EXISTS job_posting_role_tags (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  role_id     INTEGER NOT NULL REFERENCES job_posting_roles(id) ON DELETE CASCADE,
+  job_family  TEXT NOT NULL,
+  is_primary  INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL,
+  UNIQUE(role_id, job_family)
+);
+CREATE INDEX IF NOT EXISTS idx_job_posting_role_tags_role_id    ON job_posting_role_tags(role_id);
+CREATE INDEX IF NOT EXISTS idx_job_posting_role_tags_job_family ON job_posting_role_tags(job_family);
 """
 
 
@@ -195,6 +207,19 @@ def main() -> None:
             "ALTER TABLE job_postings ADD COLUMN common_preferred_json TEXT DEFAULT '[]'",
             # job_posting_roles 중복 방지 UNIQUE index (기존 DB용)
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_posting_roles_unique ON job_posting_roles(job_id, display_order)",
+            # role 단위 분류 상태 컬럼 (기존 DB용)
+            "ALTER TABLE job_posting_roles ADD COLUMN classification_status TEXT DEFAULT 'pending'",
+            # role 단위 태그 테이블 (기존 DB용 — DDL과 동일 구조)
+            """CREATE TABLE IF NOT EXISTS job_posting_role_tags (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              role_id     INTEGER NOT NULL REFERENCES job_posting_roles(id) ON DELETE CASCADE,
+              job_family  TEXT NOT NULL,
+              is_primary  INTEGER NOT NULL DEFAULT 0,
+              created_at  TEXT NOT NULL,
+              UNIQUE(role_id, job_family)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_job_posting_role_tags_role_id    ON job_posting_role_tags(role_id)",
+            "CREATE INDEX IF NOT EXISTS idx_job_posting_role_tags_job_family ON job_posting_role_tags(job_family)",
         ]:
             try:
                 connection.execute(alter_sql)

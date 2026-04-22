@@ -195,3 +195,148 @@ def save_job_posting_roles(conn: sqlite3.Connection, job_id: str, jd_payload: di
 def get_posting_count(conn: sqlite3.Connection) -> int:
     cursor = conn.execute("SELECT COUNT(*) FROM job_postings")
     return int(cursor.fetchone()[0])
+
+
+def save_job_posting_role_tags(
+    conn: sqlite3.Connection,
+    role_id: int,
+    families: list[dict],
+) -> None:
+    """role_id에 대한 job_family 태그를 교체(replace) 저장한다.
+
+    기존 태그를 먼저 삭제한 뒤 새 결과를 삽입하므로 재분류 시 구태 태그가 남지 않는다.
+    이 함수는 분류 성공 시에만 호출해야 한다. 실패 시에는 호출하지 않으면 기존 태그가 보존된다.
+    """
+    created_at = _now_iso()
+    rows = [
+        (
+            int(role_id),
+            str(f.get("id", "") or "").strip(),
+            int(f.get("is_primary", 0) or 0),
+            created_at,
+        )
+        for f in families
+        if str(f.get("id", "") or "").strip()
+    ]
+    # 기존 태그 삭제 (replace 동작 — 재분류 시 이전 결과 제거)
+    conn.execute("DELETE FROM job_posting_role_tags WHERE role_id = ?", (int(role_id),))
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO job_posting_role_tags (role_id, job_family, is_primary, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def update_role_classification_status(
+    conn: sqlite3.Connection,
+    role_id: int,
+    status: str,
+) -> None:
+    conn.execute(
+        "UPDATE job_posting_roles SET classification_status = ? WHERE id = ?",
+        (status, int(role_id)),
+    )
+
+
+def get_pending_roles_for_classify(
+    conn: sqlite3.Connection,
+    batch_size: int,
+) -> list:
+    conn.row_factory = sqlite3.Row
+    return conn.execute(
+        """
+        SELECT jpr.id,
+               jpr.job_id,
+               jpr.role_name,
+               jpr.main_tasks_json,
+               jpr.requirements_json,
+               jpr.preferred_json,
+               jp.company,
+               jp.posting_title,
+               jp.source_category,
+               jp.common_requirements_json,
+               jp.common_preferred_json
+        FROM job_posting_roles jpr
+        JOIN job_postings jp ON jp.id = jpr.job_id
+        WHERE jpr.classification_status = 'pending'
+        ORDER BY jpr.created_at ASC, jpr.id ASC
+        LIMIT ?
+        """,
+        (batch_size,),
+    ).fetchall()
+
+
+def get_roles_by_family_for_analyze(
+    conn: sqlite3.Connection,
+    job_family: str,
+) -> tuple[list[dict], int, int]:
+    """job_family로 분류된 role들의 텍스트, 공고 수(posting_count), role 수(role_count)를 반환한다.
+
+    Returns:
+        roles: role별 텍스트 dict 목록
+        posting_count: DISTINCT job_id 기준 공고 수 (sample_count로 사용)
+        role_count: 실제 role 개수
+    """
+    # 공고 수 (DISTINCT job_id) — 복합공고에서 role 여러 개가 같은 job_id를 가져도 1로 집계
+    posting_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT jpr.job_id)
+        FROM job_posting_role_tags jrt
+        JOIN job_posting_roles jpr ON jpr.id = jrt.role_id
+        WHERE jrt.job_family = ?
+          AND jpr.classification_status = 'classified'
+        """,
+        (job_family,),
+    ).fetchone()
+    posting_count = int(posting_row[0]) if posting_row else 0
+
+    rows = conn.execute(
+        """
+        SELECT jpr.id,
+               jpr.role_name,
+               jpr.main_tasks_json,
+               jpr.requirements_json,
+               jpr.preferred_json,
+               jp.common_requirements_json,
+               jp.common_preferred_json
+        FROM job_posting_role_tags jrt
+        JOIN job_posting_roles jpr ON jpr.id = jrt.role_id
+        JOIN job_postings jp ON jp.id = jpr.job_id
+        WHERE jrt.job_family = ?
+          AND jpr.classification_status = 'classified'
+        ORDER BY jpr.id ASC
+        """,
+        (job_family,),
+    ).fetchall()
+
+    roles = []
+    for row in rows:
+        roles.append({
+            "role_id": int(row[0]),
+            "role_name": str(row[1] or ""),
+            "main_tasks": json.loads(row[2] or "[]"),
+            "requirements": json.loads(row[3] or "[]"),
+            "preferred": json.loads(row[4] or "[]"),
+            "common_requirements": json.loads(row[5] or "[]"),
+            "common_preferred": json.loads(row[6] or "[]"),
+        })
+
+    role_count = len(roles)
+    return roles, posting_count, role_count
+
+
+def get_classified_families_from_roles(conn: sqlite3.Connection) -> list[str]:
+    """job_posting_role_tags 기준으로 classified된 job_family 목록을 반환한다."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT jrt.job_family
+        FROM job_posting_role_tags jrt
+        JOIN job_posting_roles jpr ON jpr.id = jrt.role_id
+        WHERE jpr.classification_status = 'classified'
+        ORDER BY jrt.job_family ASC
+        """
+    ).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]

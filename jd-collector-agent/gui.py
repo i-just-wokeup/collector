@@ -60,41 +60,76 @@ def _find_python_executable() -> str:
     return sys.executable
 
 
-def _fetch_db_counts() -> dict[str, int | str]:
+def _fetch_db_counts() -> dict:
+    """DB 현황을 role 중심 기준으로 집계한다.
+
+    집계 기준:
+        total_postings     : job_postings 전체 공고 수
+        total_roles        : job_posting_roles 전체 role 수
+        classified_roles   : job_posting_roles.classification_status = 'classified'
+        pending_roles      : job_posting_roles.classification_status = 'pending'
+        failed_roles       : job_posting_roles.classification_status = 'failed'
+        job_criteria_count : job_criteria 전체 수
+        job_family_status_line / job_family_telegram_line :
+            job_posting_role_tags 기준 직무별 role 수 집계
+            (레거시 job_tags / job_postings.classification_status 미사용)
+    """
+    _zero: dict = {
+        "total_postings": 0,
+        "total_roles": 0,
+        "classified_roles": 0,
+        "pending_roles": 0,
+        "failed_roles": 0,
+        "job_criteria_count": 0,
+        "job_family_status_line": "직무별 분류(role 기준): 없음",
+        "job_family_telegram_line": "없음",
+    }
+
     resolved_db_path = _resolve_path(_get_db_path())
     if not resolved_db_path.exists():
-        return {
-            "total_postings": 0,
-            "classified_postings": 0,
-            "job_criteria_count": 0,
-            "job_family_status_line": "직무별 분류: 없음",
-            "job_family_telegram_line": "없음",
-        }
+        return _zero
 
     conn = sqlite3.connect(resolved_db_path)
     try:
-        total_postings = int(conn.execute("SELECT COUNT(*) FROM job_postings").fetchone()[0])
-        classified_postings = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM job_postings WHERE classification_status = 'classified'"
-            ).fetchone()[0]
-        )
-        job_criteria_count = int(conn.execute("SELECT COUNT(*) FROM job_criteria").fetchone()[0])
-        family_rows = conn.execute(
-            """
-            SELECT job_family, COUNT(DISTINCT job_id) AS job_count
-            FROM job_tags
-            GROUP BY job_family
-            ORDER BY job_count DESC, job_family ASC
-            """
-        ).fetchall()
-        family_parts = [f"{job_family}: {job_count}개" for job_family, job_count in family_rows]
+        def _count(sql: str, default: int = 0) -> int:
+            try:
+                row = conn.execute(sql).fetchone()
+                return int(row[0]) if row else default
+            except Exception:
+                return default
+
+        total_postings    = _count("SELECT COUNT(*) FROM job_postings")
+        total_roles       = _count("SELECT COUNT(*) FROM job_posting_roles")
+        classified_roles  = _count("SELECT COUNT(*) FROM job_posting_roles WHERE classification_status = 'classified'")
+        pending_roles     = _count("SELECT COUNT(*) FROM job_posting_roles WHERE classification_status = 'pending'")
+        failed_roles      = _count("SELECT COUNT(*) FROM job_posting_roles WHERE classification_status = 'failed'")
+        job_criteria_count = _count("SELECT COUNT(*) FROM job_criteria")
+
+        try:
+            family_rows = conn.execute(
+                """
+                SELECT job_family, COUNT(*) AS role_count
+                FROM job_posting_role_tags
+                GROUP BY job_family
+                ORDER BY role_count DESC, job_family ASC
+                """
+            ).fetchall()
+        except Exception:
+            family_rows = []
+
+        family_parts = [f"{jf}: {rc}개" for jf, rc in family_rows]
+        family_status = "직무별 분류(role 기준): " + (" | ".join(family_parts) if family_parts else "없음")
+        family_telegram = ", ".join(family_parts) if family_parts else "없음"
+
         return {
             "total_postings": total_postings,
-            "classified_postings": classified_postings,
+            "total_roles": total_roles,
+            "classified_roles": classified_roles,
+            "pending_roles": pending_roles,
+            "failed_roles": failed_roles,
             "job_criteria_count": job_criteria_count,
-            "job_family_status_line": "직무별 분류: " + (" | ".join(family_parts) if family_parts else "없음"),
-            "job_family_telegram_line": ", ".join(family_parts) if family_parts else "없음",
+            "job_family_status_line": family_status,
+            "job_family_telegram_line": family_telegram,
         }
     finally:
         conn.close()
@@ -230,8 +265,9 @@ class CollectorGUI:
         try:
             counts = _fetch_db_counts()
             self.db_status_var.set(
-                "전체 공고 수: {total_postings} | classified 수: {classified_postings} | "
-                "job_criteria 수: {job_criteria_count}\n"
+                "전체 공고 수: {total_postings} | 전체 role 수: {total_roles} | "
+                "classified role 수: {classified_roles} | pending role 수: {pending_roles} | "
+                "failed role 수: {failed_roles} | job_criteria 수: {job_criteria_count}\n"
                 "{job_family_status_line}".format(**counts)
             )
         except Exception as err:
@@ -432,8 +468,12 @@ class CollectorGUI:
         except Exception as err:
             counts = {
                 "total_postings": -1,
-                "classified_postings": -1,
+                "total_roles": -1,
+                "classified_roles": -1,
+                "pending_roles": -1,
+                "failed_roles": -1,
                 "job_criteria_count": -1,
+                "job_family_telegram_line": "없음",
             }
             self.append_log(f"[WARN] DB 현황 조회 실패: {err}\n")
 
@@ -442,7 +482,7 @@ class CollectorGUI:
             f"exit_code={return_code}",
             f"elapsed={elapsed:.1f}s",
             f"전체 공고 수={counts['total_postings']}",
-            f"classified 수={counts['classified_postings']}",
+            f"classified role 수={counts['classified_roles']}",
             f"job_criteria 수={counts['job_criteria_count']}",
         ]
         if stage_label == "수집 시작":

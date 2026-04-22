@@ -21,6 +21,7 @@ from utils import (
     assess_low_quality_job,
     append_seen_url,
     clean_job_posting_text,
+    clean_role_first_task,
     detect_core_sections,
     ensure_dir,
     ensure_enriched_schema,
@@ -400,6 +401,18 @@ def run_collection(
             structured_roles_count = len(structured_roles) if isinstance(structured_roles, list) else 0
             print(f"[INFO] structured_roles_count={structured_roles_count}")
 
+            # posting_title / company 메타 보정
+            # capture 단계에서 generic하게 잡힌 경우 LLM 결과로 보완한다
+            _GENERIC_TITLES = {"채용공고", "공고", "untitled", "", "채용 공고", "job posting"}
+            if posting_title.lower() in _GENERIC_TITLES:
+                llm_title = str(jd_payload.get("posting_title", "") or "").strip()
+                if llm_title and llm_title.lower() not in _GENERIC_TITLES:
+                    print(f"[INFO] posting_title_fallback: '{posting_title}' → '{llm_title}'")
+                    posting_title = llm_title
+            capture_company = str(meta.get("company", "") or "").strip()
+            llm_company = str(jd_payload.get("company", "") or "").strip()
+            effective_company = capture_company or llm_company
+
             is_aggregate, aggregate_reasons = is_aggregate_posting(dom_raw_text, structured_roles_count)
             if is_aggregate:
                 print(f"[WARN] aggregate_posting_detected=true reasons={','.join(aggregate_reasons)}")
@@ -472,7 +485,7 @@ def run_collection(
                 job_id=job_id,
             )
 
-            # 저가치 문장 필터링 — DB 저장 전 섹션 정제 (raw_text 원본은 별도 보존)
+            # 저가치 문장 필터링 — normalized payload (shim) 섹션 정제 (raw_text 원본은 별도 보존)
             for section_key in ("main_tasks", "requirements", "preferred"):
                 original_lines = jd_payload.get(section_key, [])
                 if isinstance(original_lines, list):
@@ -482,7 +495,35 @@ def run_collection(
                         print(f"[INFO] filtered_{section_key}_lines={removed}")
                     jd_payload[section_key] = filtered_lines
 
-            low_quality_job, low_quality_reasons = assess_low_quality_job(jd_payload)
+            # role 텍스트 정제 — low-quality 판정 전에 수행해야 판정과 저장 기준이 일치한다.
+            # raw_text 원본은 건드리지 않고 roles[] 내부의 저장용 텍스트만 정제한다.
+            if isinstance(structured_jd_payload.get("roles"), list):
+                cleaned_roles = []
+                for role_item in structured_jd_payload["roles"]:
+                    if not isinstance(role_item, dict):
+                        cleaned_roles.append(role_item)
+                        continue
+                    role_name = str(role_item.get("role_name", "") or "").strip()
+                    role_copy = dict(role_item)
+                    # 1) main_tasks 첫 줄이 role_name 반복이면 제거
+                    tasks = role_copy.get("main_tasks", []) or []
+                    if isinstance(tasks, list):
+                        role_copy["main_tasks"] = clean_role_first_task(role_name, tasks)
+                    # 2) requirements/preferred에서 LOW_VALUE_LINE_PATTERNS 적용
+                    for sec_key in ("requirements", "preferred"):
+                        sec_val = role_copy.get(sec_key, []) or []
+                        if isinstance(sec_val, list):
+                            role_copy[sec_key] = filter_low_value_lines(sec_val)
+                    cleaned_roles.append(role_copy)
+                structured_jd_payload["roles"] = cleaned_roles
+                # 정제 후 structured_roles 참조를 갱신 — 이하 품질 판정이 정제된 데이터를 기준으로 동작한다
+                structured_roles = structured_jd_payload["roles"]
+
+            low_quality_job, low_quality_reasons = assess_low_quality_job(
+                jd_payload,
+                roles=structured_roles if isinstance(structured_roles, list) else None,
+                structured_payload=structured_jd_payload,
+            )
             print(f"[INFO] low_quality_job={str(low_quality_job).lower()}")
             if low_quality_job:
                 print(f"[WARN] low_quality_job=true reasons={','.join(low_quality_reasons)}")
@@ -502,8 +543,9 @@ def run_collection(
 
             posting = {
                 "id": job_id,
-                "company": str(meta.get("company", "") or ""),
+                "company": effective_company,
                 "posting_title": posting_title,
+                # extracted_role은 레거시 하위호환용으로만 남긴다 — 분류/분석은 job_posting_roles 기준
                 "extracted_role": str(jd_payload.get("role", "") or posting_title),
                 "source_site": adapter.site_name,
                 "source_url": link,

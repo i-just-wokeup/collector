@@ -2,7 +2,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 CORE_SECTION_KEYWORDS = [
     "주요 업무", "주요업무",
@@ -97,6 +97,27 @@ UI_NOISE_LINE_KEYWORDS_SARAMIN: list[str] = [
 # ──────────────────────────────────────────────
 # 저가치 문장 필터 상수
 # ──────────────────────────────────────────────
+
+# 분류/분석 단계에서만 적용하는 저직무구분력 필터 패턴
+# DB 저장 전에는 사용하지 않는다 — raw_text/role 원본을 오염시키지 않기 위해.
+# classify.py / analyze.py에서 Gemini에 보내기 전 텍스트 정제에 사용한다.
+GENERIC_ANALYSIS_FILTER_PATTERNS: list[str] = [
+    # 범용 학력 (직무 구분력 없음)
+    "학사 이상", "학사이상", "대졸 이상", "대졸이상",
+    "고졸 이상", "고졸이상", "전공 무관", "전공무관",
+    "초대졸 이상", "초대졸이상", "학력 무관", "학력무관",
+    "4년제 이상", "2,3년제 이상",
+    # 추상 소프트스킬 (직무 구분력 낮음)
+    "긍정적인 마인드", "긍정적 마인드", "긍정적인 태도",
+    "적극적인 자세", "적극적인 성격",
+    "팀워크 우수자", "팀플레이어",
+    "원활한 소통 능력", "원활한 커뮤니케이션",
+    "능동적인 자세",
+    # 법정/형식 공통 문구 (이미 LOW_VALUE_LINE_PATTERNS에서 storage 단계에 제거되므로 중복 무방)
+    "해외여행 결격사유", "병역필 또는 면제", "보훈대상자",
+    "장애인 우대", "국가보훈", "취업보호대상자",
+    "즉시출근 가능자",
+]
 
 # 이 패턴이 포함된 문장은 직무 기준 생성에 무가치하다
 LOW_VALUE_LINE_PATTERNS: list[str] = [
@@ -262,10 +283,52 @@ def filter_low_value_lines(lines: list[str]) -> list[str]:
     """
     requirements / preferred / main_tasks 리스트에서 저가치 문장을 제거한 리스트를 반환한다.
     원본 리스트는 수정하지 않는다.
+    DB 저장 전 단계에서 사용한다.
     """
     if not isinstance(lines, list):
         return []
     return [line for line in lines if not is_low_value_requirement_line(line)]
+
+
+def filter_generic_analysis_lines(lines: list[str]) -> list[str]:
+    """분류/분석 단계에서만 적용하는 저직무구분력 문장 제거 필터.
+
+    classify.py / analyze.py에서 Gemini에 전달하기 전 텍스트 정제에 사용한다.
+    DB 저장 전이나 raw_text에는 절대 사용하지 말 것.
+    """
+    if not isinstance(lines, list):
+        return []
+    result = []
+    for line in lines:
+        text = str(line or "").strip()
+        if not text:
+            continue
+        text_lower = text.lower()
+        if any(p.lower() in text_lower for p in GENERIC_ANALYSIS_FILTER_PATTERNS):
+            continue
+        result.append(text)
+    return result
+
+
+def clean_role_first_task(role_name: str, main_tasks: list[str]) -> list[str]:
+    """main_tasks 첫 줄이 role_name과 사실상 동일한 직무명 반복이면 제거한다.
+
+    DB 저장 전 role 텍스트 정제 단계에서 사용한다.
+    """
+    if not main_tasks or not role_name:
+        return main_tasks
+    first = str(main_tasks[0] or "").strip()
+    if not first:
+        return main_tasks
+    role = role_name.strip()
+    first_compact = re.sub(r"\s+", "", first.lower())
+    role_compact = re.sub(r"\s+", "", role.lower())
+    # 첫 항목이 role_name 자체이거나 role_name을 포함하면서 짧은 경우
+    if first_compact == role_compact:
+        return main_tasks[1:]
+    if role_compact and role_compact in first_compact and len(first_compact) <= len(role_compact) + 8:
+        return main_tasks[1:]
+    return main_tasks
 
 
 class GeminiQuotaExceededError(RuntimeError):
@@ -449,13 +512,61 @@ def _keyword_hit_count(text: str, keywords: list[str]) -> int:
     return sum(1 for keyword in keywords if keyword.lower() in lowered)
 
 
-def assess_low_quality_job(payload: dict) -> tuple[bool, list[str]]:
+def _assess_role_level_quality(roles: list, structured_payload: dict) -> list[str]:
+    """복합공고 role 배열 기준 품질 문제를 판정한다. role 수 >= 3일 때만 적용."""
+    reasons: list[str] = []
+    if not isinstance(roles, list) or len(roles) < 3:
+        return reasons
+
+    roles_count = len(roles)
+
+    # 많은 role인데 main_tasks가 있는 role이 30% 미만
+    roles_with_tasks = sum(
+        1 for r in roles
+        if isinstance(r, dict) and len(r.get("main_tasks", []) or []) >= 2
+    )
+    if roles_with_tasks / roles_count < 0.3:
+        reasons.append("shallow_aggregate_empty_tasks")
+
+    # role별 총 콘텐츠보다 common_* 가 많음 (공통 문구만 남은 패턴)
+    common_req = structured_payload.get("common_requirements") or []
+    common_pref = structured_payload.get("common_preferred") or []
+    common_total = len(common_req if isinstance(common_req, list) else []) + \
+                   len(common_pref if isinstance(common_pref, list) else [])
+    role_specific_total = sum(
+        len(r.get("main_tasks", []) or [])
+        + len(r.get("requirements", []) or [])
+        + len(r.get("preferred", []) or [])
+        for r in roles if isinstance(r, dict)
+    )
+    if common_total >= 3 and role_specific_total < common_total:
+        reasons.append("common_only_no_role_detail")
+
+    return reasons
+
+
+def assess_low_quality_job(
+    payload: dict,
+    roles: Optional[list] = None,
+    structured_payload: Optional[dict] = None,
+) -> tuple[bool, list[str]]:
+    """공고 품질을 판정한다.
+
+    Args:
+        payload: ensure_enriched_schema 이후의 normalized payload (shim 필드 포함).
+        roles: structured_jd_payload의 roles[] 배열 (복합공고 role 단위 품질 판정에 사용).
+        structured_payload: structured_jd_payload 전체 (common_requirements 접근에 사용).
+
+    Returns:
+        (is_low_quality, reasons)
+    """
     main_tasks = payload.get("main_tasks", []) if isinstance(payload.get("main_tasks", []), list) else []
     requirements = payload.get("requirements", []) if isinstance(payload.get("requirements", []), list) else []
     preferred = payload.get("preferred", []) if isinstance(payload.get("preferred", []), list) else []
 
     reasons: list[str] = []
 
+    # 단일 role 기준 체크 (shim 기반 — roles 없거나 1개짜리 공고에서 주로 적용)
     if len(main_tasks) <= 1:
         reasons.append("too_few_main_tasks")
     if len(requirements) <= 1:
@@ -469,6 +580,11 @@ def assess_low_quality_job(payload: dict) -> tuple[bool, list[str]]:
         soft_lines = sum(1 for line in preferred_texts if _keyword_hit_count(line, SOFT_SKILL_KEYWORDS) > 0)
         if len(preferred_texts) >= 3 and (soft_lines / len(preferred_texts)) >= 0.7:
             reasons.append("mostly_soft_skills")
+
+    # role 단위 품질 체크 (복합공고 — roles[]가 있을 때만)
+    if roles is not None:
+        role_reasons = _assess_role_level_quality(roles, structured_payload or {})
+        reasons.extend(role_reasons)
 
     return (len(reasons) >= 2), reasons
 
