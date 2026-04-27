@@ -206,7 +206,27 @@ Status: active
 ### reprocess_captures.py 503 재시도 로직 추가
 - 503 에러 시 60s → 120s → 180s 대기 후 재시도 (최대 3회)
 
-## 11) 다음 세션에서 꼭 기억할 점
+## 11) 캡처 품질 추가 개선 (2026-04-27 3차)
+
+### iframe 직접 접속 캡처
+- 기존: iframe 요소 body 스크린샷 (부모 페이지 너비 제한으로 잘림)
+- 변경: iframe URL로 직접 new_page 접속 후 full_page=True 캡처
+- 효과: 전체 너비 캡처 가능, 잘림 없음
+
+### 리사이즈 제거
+- 기존: 800px로 리사이즈
+- 변경: 리사이즈 없이 원본 해상도 유지
+- 그레이스케일 + 대비 + JPEG 85% 압축만 적용
+
+### collect.py dotenv 추가
+- `load_dotenv()` 누락으로 `JD_RESEARCH_TOOL_PATH` 미적용 → 수정
+- `.env`의 `JD_RESEARCH_TOOL_PATH`를 외부 `jd-research-tool` 경로로 수정
+
+### headless 모드 전환
+- `headless=False` → `headless=True`
+- viewport 1600 → 1920
+
+## 12) 다음 세션에서 꼭 기억할 점
 - `classify.py`를 실행하면 role 단위 분류가 기본으로 실행된다.
   - `--mode roles` 기본 / `--mode postings` 레거시
 - GUI 상단 DB 현황은 이제 role 기준이므로, 진행률 확인은 GUI 숫자를 그대로 봐도 된다.
