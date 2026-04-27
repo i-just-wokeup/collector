@@ -163,7 +163,34 @@ Status: active
 - `job_sections`: 기존 데이터 그대로 (레거시)
 - `job_tags`: 기존 데이터 그대로 (레거시)
 
-## 9) 다음 세션에서 꼭 기억할 점
+## 9) 캡처 이미지 전처리 및 버그 수정 (2026-04-27)
+
+### 이미지 전처리 (collector-main capture.py 기준)
+- Playwright 스크린샷 후 PIL로 전처리: 그레이스케일 + 800px 리사이즈 + 대비 1.3배 + JPEG 85% 압축
+- Gemini 타일 수 ~68% 절감 효과
+
+### 잡코리아 iframe 테이블 잘림 수정
+- `capture.py` iframe 캡처 전 CSS 주입 추가:
+  - `document.body.style.minWidth = 'unset'`
+  - `document.body.style.overflowX = 'visible'`
+  - 모든 table에 `tableLayout = 'auto'`, `width = '100%'` 적용
+- 대상: `jd-collector-agent/src/capture.py` (외부 버전)
+
+### Gemini 모델 및 503 대응
+- `vision_structure_jd.py`: `gemini-2.5-flash` 유지 (1.5/2.0 계열은 404 또는 종료됨)
+- `pipeline.py`: 503 재시도 대기 60s × (attempt+1) 지수 백오프
+
+### classify.py 배치 제한 제거
+- 기존 `LIMIT 20` 제거 → 직무 분류 버튼 1회로 pending 전체 처리
+
+### collect.py dotenv 누락 수정
+- `load_dotenv()` 추가 → `JD_RESEARCH_TOOL_PATH` 환경변수 정상 로드
+
+### reprocess_captures.py 복사
+- `collector-main` 버전을 외부 `jd-collector-agent/src/`로 복사
+- JSON 없는 캡처 폴더 재처리용
+
+## 10) 다음 세션에서 꼭 기억할 점
 - `classify.py`를 실행하면 role 단위 분류가 기본으로 실행된다.
   - `--mode roles` 기본 / `--mode postings` 레거시
 - GUI 상단 DB 현황은 이제 role 기준이므로, 진행률 확인은 GUI 숫자를 그대로 봐도 된다.

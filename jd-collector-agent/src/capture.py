@@ -79,6 +79,15 @@ def _jobkorea_locator_capture(page, output_dir: Path) -> dict:
             iframe_url = frame.url or ""
             loc = frame.locator("body").first
             if loc.is_visible(timeout=2000):
+                try:
+                    frame.evaluate("""() => {
+                        document.body.style.minWidth = 'unset';
+                        document.body.style.overflowX = 'visible';
+                        const tables = document.querySelectorAll('table');
+                        tables.forEach(t => { t.style.tableLayout = 'auto'; t.style.width = '100%'; });
+                    }""")
+                except Exception:
+                    pass
                 loc.screenshot(path=str(png_path))
                 raw_text = (frame.locator("body").inner_text(timeout=2500) or "").strip()
                 print(f"[INFO] jobkorea_capture=iframe iframe_url={iframe_url}")
