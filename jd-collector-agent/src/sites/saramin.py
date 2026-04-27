@@ -114,3 +114,16 @@ class SaraminAdapter(SiteAdapter):
             "section:has-text('함께 보면 좋은 공고')",
             "div:has-text('추천공고 더보기')",
         ]
+
+    def get_noise_hide_script(self) -> str:
+        return """
+            const anchor = document.querySelector('section.store_recommend_section');
+            if (anchor) {
+                let el = anchor;
+                while (el) {
+                    const next = el.nextElementSibling;
+                    el.style.display = 'none';
+                    el = next;
+                }
+            }
+        """

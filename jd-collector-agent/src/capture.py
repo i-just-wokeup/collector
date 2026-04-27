@@ -1,7 +1,20 @@
+import io
 from pathlib import Path
 
+from PIL import Image, ImageEnhance
 from playwright.sync_api import BrowserContext
 from sites.base import SiteAdapter
+
+
+def _preprocess_image(raw_bytes: bytes) -> bytes:
+    img = Image.open(io.BytesIO(raw_bytes)).convert("L")
+    w, h = img.size
+    if w > 800:
+        img = img.resize((800, int(h * 800 / w)), Image.LANCZOS)
+    img = ImageEnhance.Contrast(img).enhance(1.3)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85, optimize=True)
+    return buf.getvalue()
 
 STOP_CAPTURE_KEYWORDS = ["자격 요건", "우대 사항", "requirements", "preferred"]
 
@@ -70,7 +83,7 @@ def _jobkorea_locator_capture(page, output_dir: Path) -> dict:
     우선순위: iframe(GI_Read_Comt_Ifrm) → .artRead → .detail → #container → main(노이즈 숨김)
     성공 여부와 방식을 dict로 반환.
     """
-    png_path = output_dir / "page_001.png"
+    jpg_path = output_dir / "page_001.jpg"
 
     # 1) iframe 우선 (GI_Read_Comt_Ifrm)
     frame = _find_jobkorea_content_iframe(page)
@@ -88,7 +101,7 @@ def _jobkorea_locator_capture(page, output_dir: Path) -> dict:
                     }""")
                 except Exception:
                     pass
-                loc.screenshot(path=str(png_path))
+                jpg_path.write_bytes(_preprocess_image(loc.screenshot()))
                 raw_text = (frame.locator("body").inner_text(timeout=2500) or "").strip()
                 print(f"[INFO] jobkorea_capture=iframe iframe_url={iframe_url}")
                 return {
@@ -108,7 +121,7 @@ def _jobkorea_locator_capture(page, output_dir: Path) -> dict:
                 continue
             loc = page.locator(selector).first
             if loc.is_visible(timeout=1500):
-                loc.screenshot(path=str(png_path))
+                jpg_path.write_bytes(_preprocess_image(loc.screenshot()))
                 raw_text = (loc.inner_text(timeout=2500) or "").strip()
                 print(f"[INFO] jobkorea_capture=locator selector={selector}")
                 return {
@@ -128,7 +141,7 @@ def _jobkorea_locator_capture(page, output_dir: Path) -> dict:
             if loc.is_visible(timeout=1500):
                 noise_hidden = _hide_strategy_wrapper_siblings(page)
                 print(f"[INFO] jobkorea_capture=main strategy_wrapper_hidden={str(noise_hidden).lower()}")
-                loc.screenshot(path=str(png_path))
+                jpg_path.write_bytes(_preprocess_image(loc.screenshot()))
                 raw_text = (loc.inner_text(timeout=2500) or "").strip()
                 return {
                     "used": True,
@@ -203,10 +216,13 @@ def capture_job_detail(
             print(f"[INFO] body_locator_found={str(body_locator_found).lower()} selector={body_locator}")
             if body_locator_found and body_locator:
                 try:
+                    noise_script = adapter.get_noise_hide_script()
+                    if noise_script:
+                        page.evaluate(noise_script)
                     loc = page.locator(body_locator).first
                     if loc.is_visible(timeout=2000):
-                        png_path = output_dir / "page_001.png"
-                        loc.screenshot(path=str(png_path))
+                        jpg_path = output_dir / "page_001.jpg"
+                        jpg_path.write_bytes(_preprocess_image(loc.screenshot()))
                         locator_capture_used = True
                         locator_capture_selector = body_locator
                         raw_text_val = (loc.inner_text(timeout=2500) or "").strip()
@@ -230,8 +246,8 @@ def capture_job_detail(
                         print(f"[INFO] capture_stop_selector={triggered_end_selector}")
                         break
 
-                png_path = output_dir / f"page_{page_idx:03d}.png"
-                page.screenshot(path=str(png_path), full_page=False)
+                jpg_path = output_dir / f"page_{page_idx:03d}.jpg"
+                jpg_path.write_bytes(_preprocess_image(page.screenshot(full_page=False)))
                 first_capture_saved = True
 
                 page_idx += 1

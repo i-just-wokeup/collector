@@ -190,7 +190,23 @@ Status: active
 - `collector-main` 버전을 외부 `jd-collector-agent/src/`로 복사
 - JSON 없는 캡처 폴더 재처리용
 
-## 10) 다음 세션에서 꼭 기억할 점
+## 10) 캡처 품질 추가 개선 (2026-04-27 2차)
+
+### 외부 jd-collector-agent capture.py 전처리 적용
+- `_preprocess_image()` 추가: 그레이스케일 + 800px 리사이즈 + 대비 1.3배 + JPEG 85%
+- 모든 스크린샷 저장을 `.png` → `.jpg` + 전처리 적용으로 전환
+- iframe, locator, 스크롤 fallback 3가지 경로 모두 적용
+
+### saramin/wanted 노이즈 제거 스크립트 추가
+- `sites/base.py`: `get_noise_hide_script()` 기본 메서드 추가
+- `sites/saramin.py`: `section.store_recommend_section` 이후 숨김
+- `sites/wanted.py`: `article[class*="JobAssociated_JobAssociated"]` 이후 숨김
+- `capture.py`: 비-JobKorea 캡처 전 `adapter.get_noise_hide_script()` 호출
+
+### reprocess_captures.py 503 재시도 로직 추가
+- 503 에러 시 60s → 120s → 180s 대기 후 재시도 (최대 3회)
+
+## 11) 다음 세션에서 꼭 기억할 점
 - `classify.py`를 실행하면 role 단위 분류가 기본으로 실행된다.
   - `--mode roles` 기본 / `--mode postings` 레거시
 - GUI 상단 DB 현황은 이제 role 기준이므로, 진행률 확인은 GUI 숫자를 그대로 봐도 된다.

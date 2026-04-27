@@ -25,6 +25,9 @@ class SiteAdapter(ABC):
     def get_capture_end_selectors(self) -> list[str]:
         return []
 
+    def get_noise_hide_script(self) -> str:
+        return ""
+
     def make_absolute_url(self, href: str) -> str:
         return href
 

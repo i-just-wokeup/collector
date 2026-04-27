@@ -102,3 +102,16 @@ class WantedAdapter(SiteAdapter):
             "div:has-text('광고')",
             "footer",
         ]
+
+    def get_noise_hide_script(self) -> str:
+        return """
+            const anchor = document.querySelector('article[class*="JobAssociated_JobAssociated"]');
+            if (anchor) {
+                let el = anchor;
+                while (el) {
+                    const next = el.nextElementSibling;
+                    el.style.display = 'none';
+                    el = next;
+                }
+            }
+        """

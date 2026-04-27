@@ -4,6 +4,7 @@ output/raw_captures/ 에 이미 캡처된 폴더들을 대상으로
 """
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -70,36 +71,34 @@ def main() -> None:
             with json_path.open(encoding="utf-8") as f:
                 jd_payload = json.load(f)
             print(f"  [INFO] 기존 jd_result.json 사용")
-        elif _has_images(ocr_input_dir):
-            image_folder = ocr_input_dir
-            try:
-                jd_payload = generate_jd_json_from_png_folder(
-                    png_folder=image_folder,
-                    output_json_path=json_path,
-                    jd_research_tool_root=jd_research_tool_root,
-                )
-                print(f"  [INFO] 구조화 완료 → {json_path.name}")
-            except Exception as e:
-                print(f"  [ERROR] 구조화 실패: {e}")
-                failed += 1
-                continue
-        elif _has_images(capture_dir):
-            try:
-                jd_payload = generate_jd_json_from_png_folder(
-                    png_folder=capture_dir,
-                    output_json_path=json_path,
-                    jd_research_tool_root=jd_research_tool_root,
-                )
-                print(f"  [INFO] 구조화 완료 (capture_dir 직접 사용) → {json_path.name}")
-            except Exception as e:
-                print(f"  [ERROR] 구조화 실패: {e}")
-                failed += 1
-                continue
         else:
-            print(f"  [WARN] 이미지 없음, 건너뜀")
-            skipped += 1
-            continue
+            image_folder = ocr_input_dir if _has_images(ocr_input_dir) else capture_dir if _has_images(capture_dir) else None
+            if image_folder is None:
+                print(f"  [WARN] 이미지 없음, 건너뜀")
+                skipped += 1
+                continue
 
+            jd_payload = None
+            for attempt in range(3):
+                try:
+                    jd_payload = generate_jd_json_from_png_folder(
+                        png_folder=image_folder,
+                        output_json_path=json_path,
+                        jd_research_tool_root=jd_research_tool_root,
+                    )
+                    print(f"  [INFO] 구조화 완료 → {json_path.name}")
+                    break
+                except Exception as e:
+                    if "503" in str(e) or "service unavailable" in str(e).lower():
+                        wait = 60 * (attempt + 1)
+                        print(f"  [WARN] 503 에러, {wait}s 후 재시도 ({attempt + 1}/3)")
+                        time.sleep(wait)
+                    else:
+                        print(f"  [ERROR] 구조화 실패: {e}")
+                        break
+            if jd_payload is None:
+                failed += 1
+                continue
         # job_id 기준으로 site/날짜 추출 (예: jobkorea_20260417_151715_001)
         parts = job_id.split("_")
         source_site = parts[0] if parts else "unknown"
