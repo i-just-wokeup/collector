@@ -3,7 +3,10 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from capture import capture_job_detail
 from db import (
@@ -134,8 +137,8 @@ def open_login_browser(
     pw = sync_playwright().start()
     context = pw.chromium.launch_persistent_context(
         user_data_dir=str(browser_profile_dir),
-        headless=False,
-        viewport={"width": 1600, "height": 2000},
+        headless=True,
+        viewport={"width": 1920, "height": 2000},
     )
 
     try:
@@ -251,8 +254,8 @@ def run_collection(
     pw = sync_playwright().start()
     context = pw.chromium.launch_persistent_context(
         user_data_dir=str(browser_profile_dir),
-        headless=False,
-        viewport={"width": 1600, "height": 2000},
+        headless=True,
+        viewport={"width": 1920, "height": 2000},
     )
     if context.pages:
         page = context.pages[0]

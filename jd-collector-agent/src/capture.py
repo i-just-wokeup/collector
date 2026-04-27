@@ -8,9 +8,6 @@ from sites.base import SiteAdapter
 
 def _preprocess_image(raw_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(raw_bytes)).convert("L")
-    w, h = img.size
-    if w > 800:
-        img = img.resize((800, int(h * 800 / w)), Image.LANCZOS)
     img = ImageEnhance.Contrast(img).enhance(1.3)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85, optimize=True)
@@ -90,27 +87,22 @@ def _jobkorea_locator_capture(page, output_dir: Path) -> dict:
     if frame is not None:
         try:
             iframe_url = frame.url or ""
-            loc = frame.locator("body").first
-            if loc.is_visible(timeout=2000):
-                try:
-                    frame.evaluate("""() => {
-                        document.body.style.minWidth = 'unset';
-                        document.body.style.overflowX = 'visible';
-                        const tables = document.querySelectorAll('table');
-                        tables.forEach(t => { t.style.tableLayout = 'auto'; t.style.width = '100%'; });
-                    }""")
-                except Exception:
-                    pass
-                jpg_path.write_bytes(_preprocess_image(loc.screenshot()))
-                raw_text = (frame.locator("body").inner_text(timeout=2500) or "").strip()
-                print(f"[INFO] jobkorea_capture=iframe iframe_url={iframe_url}")
-                return {
-                    "used": True,
-                    "selector": "iframe:body",
-                    "iframe_used": True,
-                    "iframe_url": iframe_url,
-                    "raw_text": raw_text,
-                }
+            raw_text = (frame.locator("body").inner_text(timeout=2500) or "").strip()
+            iframe_page = page.context.new_page()
+            try:
+                iframe_page.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
+                iframe_page.wait_for_timeout(2000)
+                jpg_path.write_bytes(_preprocess_image(iframe_page.screenshot(full_page=True)))
+            finally:
+                iframe_page.close()
+            print(f"[INFO] jobkorea_capture=iframe iframe_url={iframe_url}")
+            return {
+                "used": True,
+                "selector": "iframe:body",
+                "iframe_used": True,
+                "iframe_url": iframe_url,
+                "raw_text": raw_text,
+            }
         except Exception as e:
             print(f"[INFO] jobkorea_iframe_capture_failed reason={e}")
 
@@ -171,7 +163,7 @@ def capture_job_detail(
             page.wait_for_load_state("networkidle", timeout=12000)
         except Exception:
             pass
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(4000)
 
         site_meta = adapter.extract_detail_meta(page)
         title = site_meta.get("posting_title", "").strip() or page.title().strip() or "untitled"
